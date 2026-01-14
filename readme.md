@@ -1,17 +1,17 @@
-# Fogsight (雾象) [**English**](./readme_en.md) | [**中文**](./readme.md)
+# ChatTutor [**English**](./readme_en.md) | [**中文**](./readme.md)
 
 
 <p align="center">
   <img src="https://github.com/hamutama/caimaopics/raw/main/fogsight/logos/fogsight_logo_white_bg.png"
-       alt="Fogsight Logo"
+       alt="ChatTutor Logo"
        width="300">
 </p>
 
 
 
-**雾象是一款由大型语言模型（LLM）驱动的动画引擎 agent 。用户输入抽象概念或词语，雾象会将其转化为高水平的生动动画。**
+**ChatTutor是一款由大型语言模型（LLM）驱动的动画引擎 agent 。用户输入抽象概念或词语，ChatTutor会将其转化为高水平的生动动画。**
 
-将雾象部署在本地后，您只需输入词语，点击生成，便可得到动画。
+将ChatTutor部署在本地后，您只需输入词语，点击生成，便可得到动画。
 
 您也可以直接访问网站 fogsight.ai 直接使用，免部署在线生成动画
 
@@ -22,12 +22,12 @@
 
 我们设计了易用的语言用户界面（Language User Interface），用户也可以**进一步轻松编辑或改进生成动画，做到言出法随**。
 
-雾象，意为 **“在模糊智能中的具象”**。*雾象是 WaytoAGI 开源计划项目成员。 WaytoAGI， 让更多人因 AI 而强大*
+ChatTutor，意为 **“在模糊智能中的具象”**。*ChatTutor是 WaytoAGI 开源计划项目成员。 WaytoAGI， 让更多人因 AI 而强大*
 
 
 ## 动画示例
 
-以下为 Fogsight AI 生成的动画示例，点击以跳转并查看
+以下为 ChatTutor 生成的动画示例，点击以跳转并查看
 
 
 <table>
@@ -71,8 +71,8 @@
 
 ## 核心功能
 
-* **概念即影像**: 输入一个主题，Fogsight 将为您生成一部叙事完整的高水平动画，包含双语旁白与电影级的视觉质感。  
-* **智能编排**: Fogsight 的核心是其强大的LLM驱动的编排能力。从旁白、视觉元素到动态效果，AI 将自动完成整个创作流程，一气呵成。  
+* **概念即影像**: 输入一个主题，ChatTutor 将为您生成一部叙事完整的高水平动画，包含双语旁白与电影级的视觉质感。  
+* **智能编排**: ChatTutor 的核心是其强大的LLM驱动的编排能力。从旁白、视觉元素到动态效果，AI 将自动完成整个创作流程，一气呵成。  
 * **语言用户界面 (LUI)**: 通过与 AI 的多轮对话，您可以对动画进行精准调优和迭代，直至达到您心中最理想的艺术效果。  
 
 ## 快速上手

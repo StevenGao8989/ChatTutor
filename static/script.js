@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
             en: "Results are random. Enter your modifications here for adjustments."
         },
         sendTitle: { zh: "发送", en: "Send" },
-        agentThinking: { zh: "Fogsight Agent 正在进行思考与规划，请稍后。这可能需要数十秒至数分钟...", en: "Fogsight Agent is thinking and planning, please wait..." },
+        agentThinking: { zh: "ChatTutor 正在进行思考与规划，请稍后。这可能需要数十秒至数分钟...", en: "ChatTutor is thinking and planning, please wait..." },
         generatingCode: { zh: "生成代码中...", en: "Generating code..." },
         codeComplete: { zh: "代码已完成", en: "Code generated" },
         openInNewWindow: { zh: "在新窗口中打开", en: "Open in new window" },
