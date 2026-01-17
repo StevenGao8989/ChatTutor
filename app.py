@@ -23,7 +23,8 @@ except ModuleNotFoundError:
 # -----------------------------------------------------------------------
 shanghai_tz = pytz.timezone("Asia/Shanghai")
 
-credentials = json.load(open("credentials.json"))
+with open("credentials.json", "r") as f:
+    credentials = json.load(f)
 API_KEY = credentials["API_KEY"]
 BASE_URL = credentials.get("BASE_URL", "")
 MODEL = credentials.get("MODEL", "gemini-2.5-pro")
@@ -83,12 +84,14 @@ class ChatSummary(BaseModel):
     id: str
     title: Optional[str]
     updated_at: str
+    project_id: Optional[str] = None
 
 class ChatDetail(ChatSummary):
     messages: List[ChatMessage]
 
 class NewChatRequest(BaseModel):
     title: Optional[str] = None
+    project_id: Optional[str] = None
 
 class ChatMessageRequest(BaseModel):
     role: str
@@ -106,13 +109,20 @@ class RenameProjectRequest(BaseModel):
 def now_iso() -> str:
     return datetime.now(shanghai_tz).isoformat()
 
-PROJECTS: List[Project] = []
+# 使用字典优化查找性能 O(1) 替代 O(n)
+PROJECTS_DICT: dict[str, Project] = {}
+CHAT_STORE: dict[str, dict] = {}
 
-CHAT_STORE: dict = {}
+# 并发保护锁
+_projects_lock = asyncio.Lock()
+_chats_lock = asyncio.Lock()
 
 @app.on_event("startup")
 async def reset_project_store():
-    PROJECTS.clear()
+    async with _projects_lock:
+        PROJECTS_DICT.clear()
+    async with _chats_lock:
+        CHAT_STORE.clear()
 
 # -----------------------------------------------------------------------
 # 2. 核心：流式生成器 (现在会使用 history)
@@ -165,7 +175,12 @@ html+css+js+svg，放进一个html里"""
                 await asyncio.sleep(0.05)
                 
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_msg = {
+                "error": str(e),
+                "type": type(e).__name__,
+                "message": "生成动画时发生错误，请稍后重试"
+            }
+            yield f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
             return
     else:
         messages = [
@@ -182,7 +197,12 @@ html+css+js+svg，放进一个html里"""
                 temperature=0.8, 
             )
         except OpenAIError as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_msg = {
+                "error": str(e),
+                "type": "OpenAIError",
+                "message": "LLM服务调用失败，请检查API配置"
+            }
+            yield f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
             return
 
         async for chunk in response:
@@ -218,7 +238,12 @@ async def generate(
                     break
                 yield chunk
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            error_msg = {
+                "error": str(e),
+                "type": type(e).__name__,
+                "message": "处理请求时发生错误"
+            }
+            yield f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
 
 
     async def wrapped_stream():
@@ -234,7 +259,11 @@ async def generate(
 
 @app.get("/api/projects", response_model=List[Project])
 async def list_projects():
-    return PROJECTS
+    async with _projects_lock:
+        # 按更新时间倒序返回
+        projects = list(PROJECTS_DICT.values())
+        projects.sort(key=lambda p: p.updated_at, reverse=True)
+        return projects
 
 @app.post("/api/projects", response_model=Project)
 async def create_project(payload: NewProjectRequest):
@@ -242,7 +271,8 @@ async def create_project(payload: NewProjectRequest):
     if not name:
         raise HTTPException(status_code=400, detail="Project name is required")
     project = Project(id=uuid.uuid4().hex, name=name, updated_at=now_iso())
-    PROJECTS.insert(0, project)
+    async with _projects_lock:
+        PROJECTS_DICT[project.id] = project
     return project
 
 @app.patch("/api/projects/{project_id}", response_model=Project)
@@ -250,20 +280,32 @@ async def rename_project(project_id: str, payload: RenameProjectRequest):
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Project name is required")
-    for project in PROJECTS:
-        if project.id == project_id:
-            project.name = name
-            project.updated_at = now_iso()
-            return project
-    raise HTTPException(status_code=404, detail="Project not found")
+    async with _projects_lock:
+        project = PROJECTS_DICT.get(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project.name = name
+        project.updated_at = now_iso()
+        PROJECTS_DICT[project_id] = project
+        return project
 
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
-    for index, project in enumerate(PROJECTS):
-        if project.id == project_id:
-            PROJECTS.pop(index)
-            return {"status": "ok"}
-    raise HTTPException(status_code=404, detail="Project not found")
+    async with _projects_lock:
+        if project_id not in PROJECTS_DICT:
+            raise HTTPException(status_code=404, detail="Project not found")
+        PROJECTS_DICT.pop(project_id, None)
+    
+    # 删除关联的chats
+    async with _chats_lock:
+        chat_ids_to_remove = [
+            chat_id for chat_id, chat in CHAT_STORE.items()
+            if (chat.get("project_id") or "") == project_id
+        ]
+        for chat_id in chat_ids_to_remove:
+            CHAT_STORE.pop(chat_id, None)
+    
+    return {"status": "ok"}
 
 @app.post("/api/projects/{project_id}/rename", response_model=Project)
 async def rename_project_post(project_id: str, payload: RenameProjectRequest):
@@ -275,15 +317,16 @@ async def delete_project_post(project_id: str):
 
 @app.get("/api/projects/{project_id}/share")
 async def share_project(project_id: str, request: Request):
-    exists = any(project.id == project_id for project in PROJECTS)
-    if not exists:
-        raise HTTPException(status_code=404, detail="Project not found")
+    async with _projects_lock:
+        if project_id not in PROJECTS_DICT:
+            raise HTTPException(status_code=404, detail="Project not found")
     return {"url": str(request.base_url).rstrip("/") + f"/chat?project_id={project_id}"}
 
 @app.get("/api/chats", response_model=List[ChatSummary])
 async def list_chats(request: Request):
     query = (request.query_params.get("q") or "").strip().lower()
-    chats = list(CHAT_STORE.values())
+    async with _chats_lock:
+        chats = list(CHAT_STORE.values())
     if query:
         def match_chat(chat):
             title = (chat["title"] or "").lower()
@@ -292,72 +335,123 @@ async def list_chats(request: Request):
             return any(query in (msg["content"] or "").lower() for msg in chat["messages"])
         chats = [chat for chat in chats if match_chat(chat)]
     chats.sort(key=lambda c: c["updated_at"], reverse=True)
-    return [ChatSummary(id=chat["id"], title=chat["title"], updated_at=chat["updated_at"]) for chat in chats]
+    return [
+        ChatSummary(
+            id=chat["id"],
+            title=chat["title"],
+            updated_at=chat["updated_at"],
+            project_id=chat.get("project_id"),
+        )
+        for chat in chats
+    ]
+
+@app.get("/api/projects/{project_id}/chats", response_model=List[ChatSummary])
+async def list_project_chats(project_id: str):
+    async with _chats_lock:
+        chats = [
+            chat for chat in CHAT_STORE.values()
+            if (chat.get("project_id") or "") == project_id
+        ]
+    chats.sort(key=lambda c: c["updated_at"], reverse=True)
+    return [
+        ChatSummary(
+            id=chat["id"],
+            title=chat["title"],
+            updated_at=chat["updated_at"],
+            project_id=chat.get("project_id"),
+        )
+        for chat in chats
+    ]
 
 @app.post("/api/chats", response_model=ChatSummary)
 async def create_chat(payload: NewChatRequest):
     chat_id = uuid.uuid4().hex
     title = payload.title.strip() if payload.title else ""
+    project_id = payload.project_id.strip() if payload.project_id else None
     chat = {
         "id": chat_id,
         "title": title or None,
         "created_at": now_iso(),
         "updated_at": now_iso(),
+        "project_id": project_id or None,
         "messages": [],
     }
-    CHAT_STORE[chat_id] = chat
-    return ChatSummary(id=chat_id, title=chat["title"], updated_at=chat["updated_at"])
+    async with _chats_lock:
+        CHAT_STORE[chat_id] = chat
+    return ChatSummary(
+        id=chat_id,
+        title=chat["title"],
+        updated_at=chat["updated_at"],
+        project_id=chat["project_id"],
+    )
 
 @app.get("/api/chats/{chat_id}", response_model=ChatDetail)
 async def get_chat(chat_id: str):
-    chat = CHAT_STORE.get(chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
+    async with _chats_lock:
+        chat = CHAT_STORE.get(chat_id)
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        # 创建副本避免在锁内进行复杂操作
+        chat_copy = dict(chat)
     return ChatDetail(
-        id=chat["id"],
-        title=chat["title"],
-        updated_at=chat["updated_at"],
-        messages=[ChatMessage(**msg) for msg in chat["messages"]],
+        id=chat_copy["id"],
+        title=chat_copy["title"],
+        updated_at=chat_copy["updated_at"],
+        project_id=chat_copy.get("project_id"),
+        messages=[ChatMessage(**msg) for msg in chat_copy["messages"]],
     )
 
 @app.post("/api/chats/{chat_id}/messages", response_model=ChatDetail)
 async def append_message(chat_id: str, payload: ChatMessageRequest):
-    chat = CHAT_STORE.get(chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    content = payload.content.strip()
-    chat["messages"].append({"role": payload.role, "content": content})
-    if not chat["title"] and payload.role == "user":
-        chat["title"] = content[:28] if content else "New Chat"
-    chat["updated_at"] = now_iso()
+    async with _chats_lock:
+        chat = CHAT_STORE.get(chat_id)
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        content = payload.content.strip()
+        chat["messages"].append({"role": payload.role, "content": content})
+        if not chat["title"] and payload.role == "user":
+            chat["title"] = content[:28] if content else "New Chat"
+        chat["updated_at"] = now_iso()
+        # 创建副本用于返回
+        chat_copy = dict(chat)
     return ChatDetail(
-        id=chat["id"],
-        title=chat["title"],
-        updated_at=chat["updated_at"],
-        messages=[ChatMessage(**msg) for msg in chat["messages"]],
+        id=chat_copy["id"],
+        title=chat_copy["title"],
+        updated_at=chat_copy["updated_at"],
+        project_id=chat_copy.get("project_id"),
+        messages=[ChatMessage(**msg) for msg in chat_copy["messages"]],
     )
 
 @app.patch("/api/chats/{chat_id}", response_model=ChatSummary)
 async def rename_chat(chat_id: str, payload: RenameChatRequest):
-    chat = CHAT_STORE.get(chat_id)
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    title = payload.title.strip()
-    chat["title"] = title or chat["title"]
-    chat["updated_at"] = now_iso()
-    return ChatSummary(id=chat["id"], title=chat["title"], updated_at=chat["updated_at"])
+    async with _chats_lock:
+        chat = CHAT_STORE.get(chat_id)
+        if not chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        title = payload.title.strip()
+        chat["title"] = title or chat["title"]
+        chat["updated_at"] = now_iso()
+        chat_copy = dict(chat)
+    return ChatSummary(
+        id=chat_copy["id"],
+        title=chat_copy["title"],
+        updated_at=chat_copy["updated_at"],
+        project_id=chat_copy.get("project_id"),
+    )
 
 @app.delete("/api/chats/{chat_id}")
 async def delete_chat(chat_id: str):
-    if chat_id not in CHAT_STORE:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    CHAT_STORE.pop(chat_id, None)
+    async with _chats_lock:
+        if chat_id not in CHAT_STORE:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        CHAT_STORE.pop(chat_id, None)
     return {"status": "ok"}
 
 @app.get("/api/chats/{chat_id}/share")
 async def share_chat(chat_id: str, request: Request):
-    if chat_id not in CHAT_STORE:
-        raise HTTPException(status_code=404, detail="Chat not found")
+    async with _chats_lock:
+        if chat_id not in CHAT_STORE:
+            raise HTTPException(status_code=404, detail="Chat not found")
     return {"url": str(request.base_url).rstrip("/") + f"/chat?chat_id={chat_id}"}
 
 @app.get("/", response_class=HTMLResponse)
@@ -375,6 +469,14 @@ async def read_chat(request: Request):
             "request": request,
             "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
             "view": "chat"})
+
+@app.get("/project", response_class=HTMLResponse)
+async def read_project(request: Request):
+    return templates.TemplateResponse(
+        "index.html", {
+            "request": request,
+            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
+            "view": "project"})
 
 # -----------------------------------------------------------------------
 # 4. 本地启动命令

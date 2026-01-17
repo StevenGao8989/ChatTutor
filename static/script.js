@@ -36,6 +36,10 @@ document.addEventListener('DOMContentLoaded', () => {
         projectHint: { zh: "用于归档对话与文件。", en: "Keep related chats and files together." },
         createProjectAction: { zh: "创建项目", en: "Create project" },
         projectNamePlaceholder: { zh: "例如：市场调研", en: "e.g. Market research" },
+        addFiles: { zh: "添加文件", en: "Add files" },
+        projectChatPlaceholder: { zh: "在 {project} 中新建对话", en: "New chat in {project}" },
+        projectChatEmpty: { zh: "暂无项目对话", en: "No project chats yet" },
+        projectRecent: { zh: "最近", en: "Recent" },
         chatPlaceholder: {
             zh: "Ask anything",
             en: "Ask anything"
@@ -76,8 +80,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebarToggle = document.getElementById('sidebar-toggle');
     const chatSidebar = document.querySelector('.chat-sidebar');
     const chatSearchInput = document.getElementById('chat-search-input');
+    const chatListSection = document.getElementById('chat-list-section');
+    const chatListTitle = document.getElementById('chat-list-title');
     const chatList = document.getElementById('chat-list');
     const projectList = document.getElementById('project-list');
+    const headerAppTitle = document.getElementById('header-app-title');
+    const headerProject = document.getElementById('header-project');
+    const headerProjectName = document.getElementById('header-project-name');
+    const chatMain = document.querySelector('.chat-main');
+    const projectView = document.getElementById('project-view');
+    const projectTitleText = document.getElementById('project-title-text');
+    const projectChatForm = document.getElementById('project-chat-form');
+    const projectChatInput = document.getElementById('project-chat-input');
+    const projectChatList = document.getElementById('project-chat-list');
 
     const templates = {
         user: document.getElementById('user-message-template'),
@@ -95,12 +110,68 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    let conversationHistory = [];
-    let accumulatedCode = '';
-    let placeholderInterval;
-    let activeChatId = null;
-    let openMenuId = null;
-    let openMenuType = null;
+    // 统一状态管理对象
+    const appState = {
+        conversationHistory: [],
+        accumulatedCode: '',
+        placeholderInterval: null,
+        activeChatId: null,
+        highlightedChatId: null,
+        activeProjectId: null,
+        activeProjectName: '',
+        openMenuId: null,
+        openMenuType: null,
+        cachedProjects: [],
+        activeProjectChats: [],
+        expandedProjectIds: new Set()
+    };
+
+    // 通用API调用函数，统一错误处理
+    const apiCall = async (url, options = {}) => {
+        const {
+            method = 'GET',
+            body = null,
+            fallbackUrl = null,
+            fallbackMethod = null,
+            errorMessage = '操作失败'
+        } = options;
+
+        const makeRequest = async (requestUrl, requestMethod) => {
+            try {
+                const requestOptions = {
+                    method: requestMethod,
+                    headers: { 'Content-Type': 'application/json' },
+                };
+                if (body) {
+                    requestOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+                }
+                const response = await fetch(requestUrl, requestOptions);
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.message || errorData.detail || `${errorMessage}: ${response.status}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error(`API call failed: ${requestUrl}`, error);
+                throw error;
+            }
+        };
+
+        try {
+            return await makeRequest(url, method);
+        } catch (error) {
+            // 如果有fallback，尝试fallback
+            if (fallbackUrl && fallbackMethod) {
+                try {
+                    return await makeRequest(fallbackUrl, fallbackMethod);
+                } catch (fallbackError) {
+                    console.error('Fallback also failed:', fallbackError);
+                    throw error; // 抛出原始错误
+                }
+            }
+            throw error;
+        }
+    };
 
     async function handleFormSubmit(e) {
         e.preventDefault();
@@ -118,33 +189,56 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (isInitial) switchToChatView();
 
-        if (!activeChatId) {
-            const newChat = await createChat(topic);
-            activeChatId = newChat?.id || null;
-            fetchChats(chatSearchInput?.value?.trim() || '');
+        if (!appState.activeChatId) {
+            const newChat = await createChat(topic, appState.activeProjectId);
+            appState.activeChatId = newChat?.id || null;
+            appState.highlightedChatId = appState.activeChatId;
+            if (appState.activeProjectId) {
+                fetchProjectChats();
+            }
+            refreshChats();
         }
 
-        conversationHistory.push({ role: 'user', content: topic });
-        appendMessageToChat(activeChatId, 'user', topic);
-        startGeneration(topic, activeChatId);
+        appState.conversationHistory.push({ role: 'user', content: topic });
+        appendMessageToChat(appState.activeChatId, 'user', topic);
+        startGeneration(topic, appState.activeChatId);
         input.value = '';
         if (isInitial) placeholderContainer?.classList?.remove('hidden');
     }
 
-    async function startGeneration(topic, chatId) {
+    async function handleProjectChatSubmit(e) {
+        e.preventDefault();
+        if (!projectChatInput || !appState.activeProjectId) return;
+        const topic = projectChatInput.value.trim();
+        if (!topic) return;
+        const newChat = await createChat(topic, appState.activeProjectId);
+        appState.activeChatId = newChat?.id || null;
+        projectChatInput.value = '';
+        if (!appState.activeChatId) return;
+        fetchProjectChats();
+        const renderUI = window.location.pathname !== '/project';
+        if (renderUI) {
+            refreshChats();
+            showChatView();
+        }
+        startGeneration(topic, appState.activeChatId, { renderUI });
+    }
+
+    async function startGeneration(topic, chatId, options = {}) {
+        const { renderUI = true } = options;
         console.log('Getting generation from backend.');
         const welcomeMessage = document.getElementById('chat-welcome');
-        if (welcomeMessage) {
+        if (renderUI && welcomeMessage) {
             welcomeMessage.style.display = 'none';
         }
-        appendUserMessage(topic);
-        const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
+        if (renderUI) appendUserMessage(topic);
+        const agentThinkingMessage = renderUI ? appendAgentStatus(translations.agentThinking[currentLang]) : null;
         const submitButton = document.querySelector('.submit-button');
         if (submitButton) {
             submitButton.disabled = true;
             submitButton.classList.add('disabled');
         }
-        accumulatedCode = '';
+        appState.accumulatedCode = '';
         let inCodeBlock = false;
         let codeBlockElement = null;
 
@@ -152,7 +246,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${config.apiBaseUrl}/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ topic: topic, history: conversationHistory })
+                body: JSON.stringify({ topic: topic, history: appState.conversationHistory })
             });
 
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -161,78 +255,93 @@ document.addEventListener('DOMContentLoaded', () => {
             const decoder = new TextDecoder();
             let buffer = '';
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n\n');
-                buffer = lines.pop();
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop();
 
-                for (const line of lines) {
-                    if (!line.startsWith('data: ')) continue;
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
 
-                    const jsonStr = line.substring(6);
+                        const jsonStr = line.substring(6);
                     if (jsonStr.includes('[DONE]')) {
                         console.log('Streaming complete');
-                        conversationHistory.push({ role: 'assistant', content: accumulatedCode });
-                        appendMessageToChat(chatId, 'assistant', accumulatedCode);
-                        fetchChats(chatSearchInput?.value?.trim() || '');
-
-                        if (!codeBlockElement) {
-                            console.warn('No code block element created. Full response:', accumulatedCode);
-                            throw new LLMParseError('LLM did not return a complete code block.');
-                        }
-
-                        if (!isHtmlContentValid(accumulatedCode)) {
-                            console.warn('Invalid HTML received:\n', accumulatedCode);
-                            throw new LLMParseError('Invalid HTML content received.');
-                        }
-
-                        markCodeAsComplete(codeBlockElement);
-
-                        try {
-                            if (accumulatedCode) {
-                                appendAnimationPlayer(accumulatedCode, topic);
+                        appState.conversationHistory.push({ role: 'assistant', content: appState.accumulatedCode });
+                        appendMessageToChat(chatId, 'assistant', appState.accumulatedCode);
+                            if (renderUI) {
+                                refreshChats();
                             }
+
+                            if (renderUI && !codeBlockElement) {
+                                console.warn('No code block element created. Full response:', appState.accumulatedCode);
+                                throw new LLMParseError('LLM did not return a complete code block.');
+                            }
+
+                            if (renderUI && !isHtmlContentValid(appState.accumulatedCode)) {
+                                console.warn('Invalid HTML received:\n', appState.accumulatedCode);
+                                throw new LLMParseError('Invalid HTML content received.');
+                            }
+
+                            if (renderUI && codeBlockElement) {
+                                markCodeAsComplete(codeBlockElement);
+                            }
+
+                            try {
+                                if (renderUI && appState.accumulatedCode) {
+                                    appendAnimationPlayer(appState.accumulatedCode, topic);
+                                }
+                            } catch (err) {
+                                console.error('appendAnimationPlayer failed:', err);
+                                throw new LLMParseError('Animation rendering failed.');
+                            }
+                            scrollToBottom();
+                            return;
+                        }
+
+                        let data;
+                        try {
+                            data = JSON.parse(jsonStr);
                         } catch (err) {
-                            console.error('appendAnimationPlayer failed:', err);
-                            throw new LLMParseError('Animation rendering failed.');
+                            console.error('Failed to parse JSON:', jsonStr);
+                            throw new LLMParseError('Invalid response format from server.');
                         }
-                        scrollToBottom();
-                        return;
-                    }
 
-                    let data;
-                    try {
-                        data = JSON.parse(jsonStr);
-                    } catch (err) {
-                        console.error('Failed to parse JSON:', jsonStr);
-                        throw new LLMParseError('Invalid response format from server.');
-                    }
-
-                    if (data.error) {
-                        throw new LLMParseError(data.error);
-                    }
-                    const token = data.token || '';
-
-                    if (!inCodeBlock && token.includes('```')) {
-                        inCodeBlock = true;
-                        if (agentThinkingMessage) agentThinkingMessage.remove();
-                        codeBlockElement = appendCodeBlock();
-                        const contentAfterMarker = token.substring(token.indexOf('```') + 3).replace(/^html\n/, '');
-                        updateCodeBlock(codeBlockElement, contentAfterMarker);
-                    } else if (inCodeBlock) {
-                        if (token.includes('```')) {
-                            inCodeBlock = false;
-                            const contentBeforeMarker = token.substring(0, token.indexOf('```'));
-                            updateCodeBlock(codeBlockElement, contentBeforeMarker);
-                        } else {
-                            updateCodeBlock(codeBlockElement, token);
+                        if (data.error) {
+                            const errorMessage = data.message || data.error || '未知错误';
+                            throw new LLMParseError(errorMessage, data.type || 'SERVER_ERROR');
                         }
-                    }
+                        const token = data.token || '';
+
+                        if (!inCodeBlock && token.includes('```')) {
+                            inCodeBlock = true;
+                            if (agentThinkingMessage) agentThinkingMessage.remove();
+                            if (renderUI) {
+                                codeBlockElement = appendCodeBlock();
+                            }
+                            const contentAfterMarker = token.substring(token.indexOf('```') + 3).replace(/^html\n/, '');
+                            appState.accumulatedCode += contentAfterMarker;
+                            if (renderUI) updateCodeBlock(codeBlockElement, contentAfterMarker);
+                        } else if (inCodeBlock) {
+                            if (token.includes('```')) {
+                                inCodeBlock = false;
+                                const contentBeforeMarker = token.substring(0, token.indexOf('```'));
+                                appState.accumulatedCode += contentBeforeMarker;
+                                if (renderUI) updateCodeBlock(codeBlockElement, contentBeforeMarker);
+                            } else {
+                                appState.accumulatedCode += token;
+                                if (renderUI) updateCodeBlock(codeBlockElement, token);
+                            }
+                        }
                 }
             }
+        } finally {
+            // 确保释放ReadableStream资源
+            reader.releaseLock();
+        }
         } catch (error) {
             console.error("Streaming failed:", error);
             if (agentThinkingMessage) agentThinkingMessage.remove();
@@ -260,8 +369,9 @@ document.addEventListener('DOMContentLoaded', () => {
         body.classList.remove('show-initial-view');
         body.classList.add('show-chat-view');
         languageSwitcher.style.display = 'none';
-        fetchProjects();
-        fetchChats();
+        updateHeaderProject();
+        updateChatListTitle();
+        refreshSidebarLists();
         // 更新URL为 /chat，但不刷新页面
         if (window.location.pathname !== '/chat') {
             window.history.pushState({ view: 'chat' }, '', '/chat');
@@ -293,7 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const span = document.createElement('span');
         span.textContent = text;
         codeElement.appendChild(span);
-        accumulatedCode += text;
+        // 注意：accumulatedCode 已经在调用处更新，这里不需要重复累加
 
         const codeContent = codeElement.closest('.code-content');
         if (codeContent) {
@@ -379,6 +489,104 @@ document.addEventListener('DOMContentLoaded', () => {
         container.innerHTML = `<div class="sidebar-empty">${translations[key]?.[currentLang] || ''}</div>`;
     };
 
+    const updateHeaderProject = () => {
+        if (!headerProject || !headerAppTitle || !headerProjectName) return;
+        if (appState.activeProjectId) {
+            headerAppTitle.style.display = 'none';
+            headerProject.classList.remove('hidden');
+            headerProjectName.textContent = appState.activeProjectName || '';
+        } else {
+            headerProject.classList.add('hidden');
+            headerAppTitle.style.display = 'inline-flex';
+        }
+    };
+
+    const renderProjectEmptyState = () => {
+        if (!projectChatList) return;
+        projectChatList.classList.add('is-empty');
+        projectChatList.innerHTML = `<div class="project-chat-empty">${translations.projectChatEmpty?.[currentLang] || ''}</div>`;
+    };
+
+    const updateProjectPlaceholder = () => {
+        if (!projectChatInput) return;
+        const template = translations.projectChatPlaceholder?.[currentLang] || '';
+        projectChatInput.placeholder = template.replace('{project}', appState.activeProjectName || '');
+    };
+
+    const updateChatListTitle = () => {
+        if (!chatListTitle) return;
+        chatListTitle.textContent = translations.recentChats?.[currentLang] || '';
+    };
+
+    const updateChatListVisibility = () => {
+        if (!chatListSection) return;
+        chatListSection.style.display = 'block';
+    };
+
+    const getChatSearchQuery = () => (chatSearchInput?.value || '').trim();
+    const refreshChats = (query) => fetchChats(query ?? getChatSearchQuery());
+    const refreshSidebarLists = () => {
+        fetchProjects();
+        refreshChats();
+    };
+
+    const showProjectView = () => {
+        if (chatMain) chatMain.classList.add('show-project');
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
+        if (projectTitleText) {
+            projectTitleText.textContent = appState.activeProjectName || '';
+        }
+        updateProjectPlaceholder();
+        renderProjectChatList(appState.activeProjectChats);
+    };
+
+    const showChatView = () => {
+        if (chatMain) chatMain.classList.remove('show-project');
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
+    };
+
+    const syncProjectContext = (projectId, projectName = '') => {
+        appState.activeProjectId = projectId;
+        if (!projectName && appState.cachedProjects.length) {
+            const match = appState.cachedProjects.find(project => project.id === projectId);
+            projectName = match?.name || '';
+        }
+        appState.activeProjectName = projectName || '';
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
+        renderProjectList(appState.cachedProjects);
+    };
+
+    const setActiveProject = (projectId, projectName = '', options = {}) => {
+        const { updateHistory = true } = options;
+        syncProjectContext(projectId, projectName);
+        closeMenus();
+        appState.highlightedChatId = null;
+        const isProjectRoute = window.location.pathname === '/project';
+        if (isProjectRoute) {
+            renderChatList([]);
+        }
+        showProjectView();
+        fetchProjectChats();
+        refreshChats();
+        if (updateHistory && (window.location.pathname === '/chat' || window.location.pathname === '/project')) {
+            const url = new URL(window.location.href);
+            url.searchParams.set('project_id', projectId);
+            url.searchParams.delete('chat_id');
+            if (isProjectRoute) {
+                window.history.pushState({ view: 'project', project_id: projectId }, '', url.toString());
+            } else {
+                url.pathname = '/chat';
+                window.history.pushState({ view: 'chat', project_id: projectId }, '', url.toString());
+            }
+        }
+    };
+
     const renderProjectList = (projects = []) => {
         if (!projectList) return;
         if (!projects.length) {
@@ -388,25 +596,87 @@ document.addEventListener('DOMContentLoaded', () => {
         projectList.innerHTML = '';
         projects.forEach(project => {
             const item = document.createElement('div');
-            item.className = 'sidebar-list-item';
+            item.className = 'sidebar-list-item project-item';
+            if (project.id === appState.activeProjectId) item.classList.add('active');
             item.dataset.projectId = project.id;
+            item.dataset.projectName = project.name;
+            const isExpanded = appState.expandedProjectIds.has(project.id);
+            const recentHtml = project.id === appState.activeProjectId && isExpanded
+                ? `
+                    <div class="project-recent">
+                        <div class="project-recent-title">${translations.projectRecent?.[currentLang] || ''}</div>
+                        <div class="project-recent-list">
+                            ${appState.activeProjectChats.length
+                                ? appState.activeProjectChats.map(chat => `
+                                    <button class="project-recent-item" data-chat-id="${chat.id}">
+                                        <span class="project-recent-name">${chat.title || translations.newChat[currentLang]}</span>
+                                        <span class="project-recent-time">${formatTime(chat.updated_at)}</span>
+                                    </button>
+                                `).join('')
+                                : `<div class="project-recent-empty">${translations.projectChatEmpty?.[currentLang] || ''}</div>`
+                            }
+                        </div>
+                    </div>
+                `
+                : '';
             item.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M4 6h16M4 10h16M4 14h10"/><path d="M4 18h6"/>
                 </svg>
                 <span class="sidebar-title">${project.name}</span>
+                <button class="project-toggle ${isExpanded ? 'expanded' : ''}" title="折叠/展开" data-action="toggle-project">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+                    </svg>
+                </button>
                 <button class="sidebar-item-menu project-menu" title="更多" data-action="menu">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
                         <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
                     </svg>
                 </button>
-                <div class="sidebar-item-dropdown ${openMenuType === 'project' && openMenuId === project.id ? 'open' : ''}">
+                <div class="sidebar-item-dropdown ${appState.openMenuType === 'project' && appState.openMenuId === project.id ? 'open' : ''}">
                     <button data-action="share">${translations.shareProject[currentLang]}</button>
                     <button data-action="rename">${translations.renameProject[currentLang]}</button>
                     <button data-action="delete" class="danger">${translations.deleteProject[currentLang]}</button>
                 </div>
+                ${recentHtml}
             `;
             projectList.appendChild(item);
+        });
+    };
+
+    const renderProjectChatList = (chats = []) => {
+        if (!projectChatList) return;
+        if (!chats.length) {
+            renderProjectEmptyState();
+            return;
+        }
+        projectChatList.classList.remove('is-empty');
+        projectChatList.innerHTML = '';
+        chats.forEach(chat => {
+            const item = document.createElement('div');
+            item.className = 'project-chat-item';
+            item.dataset.chatId = chat.id;
+            item.innerHTML = `
+                <div class="project-chat-content">
+                    <div class="project-chat-title">${chat.title || translations.newChat[currentLang]}</div>
+                    <div class="project-chat-subtitle">${translations.projectHint?.[currentLang] || ''}</div>
+                </div>
+                <div class="project-chat-meta">
+                    <span class="project-chat-time">${formatTime(chat.updated_at)}</span>
+                    <button class="sidebar-item-menu" title="更多" data-action="menu">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                            <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
+                        </svg>
+                    </button>
+                    <div class="sidebar-item-dropdown ${appState.openMenuType === 'project-chat' && appState.openMenuId === chat.id ? 'open' : ''}">
+                        <button data-action="share">${translations.shareChat[currentLang]}</button>
+                        <button data-action="rename">${translations.renameChat[currentLang]}</button>
+                        <button data-action="delete" class="danger">${translations.deleteChat[currentLang]}</button>
+                    </div>
+                </div>
+            `;
+            projectChatList.appendChild(item);
         });
     };
 
@@ -420,7 +690,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chats.forEach(chat => {
             const item = document.createElement('div');
             item.className = 'sidebar-list-item';
-            if (chat.id === activeChatId) item.classList.add('active');
+            if (chat.id === appState.highlightedChatId) item.classList.add('active');
             item.dataset.chatId = chat.id;
             item.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -433,7 +703,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
                     </svg>
                 </button>
-                <div class="sidebar-item-dropdown ${openMenuType === 'chat' && openMenuId === chat.id ? 'open' : ''}">
+                <div class="sidebar-item-dropdown ${appState.openMenuType === 'chat' && appState.openMenuId === chat.id ? 'open' : ''}">
                     <button data-action="share">${translations.shareChat[currentLang]}</button>
                     <button data-action="rename">${translations.renameChat[currentLang]}</button>
                     <button data-action="delete" class="danger">${translations.deleteChat[currentLang]}</button>
@@ -443,76 +713,103 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+
     const fetchProjects = async () => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/projects`);
-            if (!response.ok) throw new Error('Failed to load projects');
-            const data = await response.json();
+            const data = await apiCall(`${config.apiBaseUrl}/api/projects`, {
+                errorMessage: '加载项目列表失败'
+            });
+            appState.cachedProjects = data;
             renderProjectList(data);
+            if (appState.activeProjectId) {
+                const match = appState.cachedProjects.find(project => project.id === appState.activeProjectId);
+                if (match) {
+                    appState.activeProjectName = match.name;
+                    updateHeaderProject();
+                }
+            }
         } catch (error) {
+            console.error('Failed to fetch projects:', error);
+            appState.cachedProjects = [];
             renderProjectList([]);
+        }
+    };
+
+    const fetchProjectChats = async () => {
+        if (!appState.activeProjectId) {
+            appState.activeProjectChats = [];
+            renderProjectList(appState.cachedProjects);
+            return;
+        }
+        try {
+            const data = await apiCall(`${config.apiBaseUrl}/api/projects/${appState.activeProjectId}/chats`, {
+                errorMessage: '加载项目对话失败'
+            });
+            appState.activeProjectChats = data;
+            renderProjectList(appState.cachedProjects);
+            renderProjectChatList(appState.activeProjectChats);
+        } catch (error) {
+            console.error('Failed to fetch project chats:', error);
+            appState.activeProjectChats = [];
+            renderProjectList(appState.cachedProjects);
+            renderProjectChatList(appState.activeProjectChats);
         }
     };
 
     const createProject = async (name) => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/projects`, {
+            return await apiCall(`${config.apiBaseUrl}/api/projects`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name })
+                body: { name },
+                errorMessage: '创建项目失败'
             });
-            if (!response.ok) throw new Error('Failed to create project');
-            return await response.json();
         } catch (error) {
+            console.error('Failed to create project:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
             return null;
         }
     };
 
     const renameProject = async (projectId, name) => {
-        const payload = JSON.stringify({ name });
-        const tryRename = async (url, method) => {
-            try {
-                const response = await fetch(url, {
-                    method,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: payload
-                });
-                if (!response.ok) throw new Error('Failed to rename project');
-                return await response.json();
-            } catch (error) {
-                return null;
-            }
-        };
-
-        const baseUrl = `${config.apiBaseUrl}/api/projects/${projectId}`;
-        const renamed = await tryRename(baseUrl, 'PATCH');
-        if (renamed) return renamed;
-        return await tryRename(`${baseUrl}/rename`, 'POST');
+        try {
+            return await apiCall(`${config.apiBaseUrl}/api/projects/${projectId}`, {
+                method: 'PATCH',
+                body: { name },
+                fallbackUrl: `${config.apiBaseUrl}/api/projects/${projectId}/rename`,
+                fallbackMethod: 'POST',
+                errorMessage: '重命名项目失败'
+            });
+        } catch (error) {
+            console.error('Failed to rename project:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
+            return null;
+        }
     };
 
     const deleteProject = async (projectId) => {
-        const tryDelete = async (url, method) => {
-            try {
-                const response = await fetch(url, { method });
-                if (!response.ok) throw new Error('Failed to delete project');
-                return true;
-            } catch (error) {
-                return false;
-            }
-        };
-
-        const baseUrl = `${config.apiBaseUrl}/api/projects/${projectId}`;
-        const removed = await tryDelete(baseUrl, 'DELETE');
-        if (removed) return true;
-        return await tryDelete(`${baseUrl}/delete`, 'POST');
+        try {
+            await apiCall(`${config.apiBaseUrl}/api/projects/${projectId}`, {
+                method: 'DELETE',
+                fallbackUrl: `${config.apiBaseUrl}/api/projects/${projectId}/delete`,
+                fallbackMethod: 'POST',
+                errorMessage: '删除项目失败'
+            });
+            return true;
+        } catch (error) {
+            console.error('Failed to delete project:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
+            return false;
+        }
     };
 
     const shareProject = async (projectId) => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/projects/${projectId}/share`);
-            if (!response.ok) throw new Error('Failed to share project');
-            return await response.json();
+            return await apiCall(`${config.apiBaseUrl}/api/projects/${projectId}/share`, {
+                errorMessage: '获取分享链接失败'
+            });
         } catch (error) {
+            console.error('Failed to share project:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
             return null;
         }
     };
@@ -521,11 +818,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const url = new URL(`${window.location.origin}${config.apiBaseUrl}/api/chats`);
             if (query) url.searchParams.set('q', query);
-            const response = await fetch(url.toString());
-            if (!response.ok) throw new Error('Failed to load chats');
-            const data = await response.json();
+            const data = await apiCall(url.toString(), {
+                errorMessage: '加载对话列表失败'
+            });
             renderChatList(data);
         } catch (error) {
+            console.error('Failed to fetch chats:', error);
             renderChatList([]);
         }
     };
@@ -533,24 +831,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const fetchChatDetail = async (chatId) => {
         if (!chatId) return;
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}`);
-            if (!response.ok) throw new Error('Failed to load chat');
-            return await response.json();
+            return await apiCall(`${config.apiBaseUrl}/api/chats/${chatId}`, {
+                errorMessage: '加载对话详情失败'
+            });
         } catch (error) {
+            console.error('Failed to fetch chat detail:', error);
             return null;
         }
     };
 
     const renameChat = async (chatId, title) => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}`, {
+            return await apiCall(`${config.apiBaseUrl}/api/chats/${chatId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title })
+                body: { title },
+                errorMessage: '重命名对话失败'
             });
-            if (!response.ok) throw new Error('Failed to rename chat');
-            return await response.json();
         } catch (error) {
+            console.error('Failed to rename chat:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
             return null;
         }
     };
@@ -567,24 +866,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const shareChat = async (chatId) => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}/share`);
-            if (!response.ok) throw new Error('Failed to share chat');
-            return await response.json();
+            return await apiCall(`${config.apiBaseUrl}/api/chats/${chatId}/share`, {
+                errorMessage: '获取分享链接失败'
+            });
         } catch (error) {
+            console.error('Failed to share chat:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
             return null;
         }
     };
 
-    const createChat = async (title = '') => {
+    const createChat = async (title = '', projectId = null) => {
         try {
-            const response = await fetch(`${config.apiBaseUrl}/api/chats`, {
+            return await apiCall(`${config.apiBaseUrl}/api/chats`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title })
+                body: { title, project_id: projectId },
+                errorMessage: '创建对话失败'
             });
-            if (!response.ok) throw new Error('Failed to create chat');
-            return await response.json();
         } catch (error) {
+            console.error('Failed to create chat:', error);
+            showWarning(error.message || translations.errorMessage[currentLang]);
             return null;
         }
     };
@@ -622,14 +923,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadChatById = async (chatId) => {
         const detail = await fetchChatDetail(chatId);
         if (!detail) return;
-        activeChatId = chatId;
-        openMenuId = null;
-        conversationHistory = detail.messages || [];
+        appState.activeChatId = chatId;
+        appState.highlightedChatId = chatId;
+        appState.openMenuId = null;
+        if (detail.project_id) {
+            const match = appState.cachedProjects.find(project => project.id === detail.project_id);
+            syncProjectContext(detail.project_id, match?.name || '');
+            fetchProjectChats();
+        } else if (appState.activeProjectId) {
+            appState.activeProjectId = null;
+            appState.activeProjectName = '';
+            appState.highlightedChatId = chatId;
+            updateHeaderProject();
+            updateChatListTitle();
+            updateChatListVisibility();
+            renderProjectList(appState.cachedProjects);
+        }
+        showChatView();
+        appState.conversationHistory = detail.messages || [];
         clearChatLog();
-        if (conversationHistory.length) {
+        if (appState.conversationHistory.length) {
             const welcomeMessage = document.getElementById('chat-welcome');
             if (welcomeMessage) welcomeMessage.style.display = 'none';
-            conversationHistory.forEach(message => {
+            appState.conversationHistory.forEach(message => {
                 if (message.role === 'user') {
                     appendUserMessage(message.content);
                 } else if (message.role === 'assistant') {
@@ -637,12 +953,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
         }
-        fetchChats(chatSearchInput?.value?.trim() || '');
+        refreshChats();
+        if (window.location.pathname === '/chat' || window.location.pathname === '/project') {
+            const url = new URL(window.location.href);
+            if (window.location.pathname !== '/chat') {
+                url.pathname = '/chat';
+            }
+            url.searchParams.set('chat_id', chatId);
+            if (detail.project_id) {
+                url.searchParams.set('project_id', detail.project_id);
+            } else {
+                url.searchParams.delete('project_id');
+            }
+            window.history.pushState({ view: 'chat', chat_id: chatId }, '', url.toString());
+        }
     };
 
     const closeMenus = () => {
-        openMenuId = null;
-        openMenuType = null;
+        appState.openMenuId = null;
+        appState.openMenuType = null;
         document.querySelectorAll('.sidebar-item-dropdown.open').forEach(el => el.classList.remove('open'));
     };
 
@@ -656,12 +985,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function startPlaceholderAnimation() {
-        if (placeholderInterval) clearInterval(placeholderInterval);
+        if (appState.placeholderInterval) clearInterval(appState.placeholderInterval);
         const placeholderTexts = translations.placeholders[currentLang];
         if (placeholderTexts && placeholderTexts.length > 0) {
             placeholderIndex = 0;
             setNextPlaceholder();
-            placeholderInterval = setInterval(setNextPlaceholder, 4000);
+            appState.placeholderInterval = setInterval(setNextPlaceholder, 4000);
         }
     }
 
@@ -681,10 +1010,16 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.toggle('active', btn.dataset.lang === lang);
         });
         startPlaceholderAnimation();
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
+        if (appState.activeProjectId) {
+            updateProjectPlaceholder();
+            renderProjectChatList(activeProjectChats);
+        }
         localStorage.setItem('preferredLanguage', lang);
         if (body.classList.contains('show-chat-view')) {
-            fetchProjects();
-            fetchChats(chatSearchInput?.value?.trim() || '');
+            refreshSidebarLists();
         }
     }
 
@@ -693,16 +1028,20 @@ document.addEventListener('DOMContentLoaded', () => {
     function init() {
         // 根据URL路径决定显示哪个视图
         const path = window.location.pathname;
-        if (path === '/chat') {
-            // 如果是 /chat 路由，直接显示聊天视图
+        if (path === '/chat' || path === '/project') {
+            // 如果是 /chat 或 /project 路由，直接显示聊天视图
             body.classList.remove('show-initial-view');
             body.classList.add('show-chat-view');
             languageSwitcher.style.display = 'none';
-            fetchProjects();
-            fetchChats();
-            const chatId = new URLSearchParams(window.location.search).get('chat_id');
+            refreshSidebarLists();
+            const searchParams = new URLSearchParams(window.location.search);
+            const chatId = searchParams.get('chat_id');
+            const projectId = searchParams.get('project_id');
             if (chatId) {
                 loadChatById(chatId);
+                showChatView();
+            } else if (projectId) {
+                setActiveProject(projectId, '', { updateHistory: false });
             }
         } else {
             // 默认显示初始视图
@@ -720,17 +1059,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         initialForm.addEventListener('submit', handleFormSubmit);
         chatForm.addEventListener('submit', handleFormSubmit);
+        projectChatForm?.addEventListener('submit', handleProjectChatSubmit);
         newChatButton.addEventListener('click', async () => {
             if (window.location.pathname !== '/chat') {
                 window.location.href = '/chat';
                 return;
             }
-            activeChatId = null;
-            conversationHistory = [];
+            appState.activeProjectId = null;
+            appState.activeProjectName = '';
+            showChatView();
+            appState.activeChatId = null;
+            appState.highlightedChatId = null;
+            appState.conversationHistory = [];
             clearChatLog();
             const newChat = await createChat();
-            activeChatId = newChat?.id || null;
-            fetchChats(chatSearchInput?.value?.trim() || '');
+            appState.activeChatId = newChat?.id || null;
+            appState.highlightedChatId = appState.activeChatId;
+            refreshChats();
+            const url = new URL(window.location.href);
+            url.searchParams.delete('project_id');
+            url.searchParams.delete('chat_id');
+            window.history.pushState({ view: 'chat' }, '', url.toString());
         });
         
         // 侧边栏折叠/展开功能
@@ -744,7 +1093,7 @@ document.addEventListener('DOMContentLoaded', () => {
             chatSearchInput.addEventListener('input', (e) => {
                 const query = e.target.value.trim();
                 clearTimeout(searchTimer);
-                searchTimer = setTimeout(() => fetchChats(query), 200);
+                searchTimer = setTimeout(() => refreshChats(query), 200);
             });
         }
         if (chatList) {
@@ -758,13 +1107,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     const action = actionBtn.dataset.action;
                     if (action === 'menu') {
                         e.stopPropagation();
-                        if (openMenuType === 'chat' && openMenuId === chatId) {
+                        if (appState.openMenuType === 'chat' && appState.openMenuId === chatId) {
                             closeMenus();
                             return;
                         }
                         closeMenus();
-                        openMenuId = chatId;
-                        openMenuType = 'chat';
+                        appState.openMenuId = chatId;
+                        appState.openMenuType = 'chat';
                         item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
                         return;
                     }
@@ -783,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         e.stopPropagation();
                         const newTitle = prompt(translations.renamePlaceholder[currentLang]);
                         if (newTitle) {
-                            renameChat(chatId, newTitle).then(() => fetchChats(chatSearchInput?.value?.trim() || ''));
+                            renameChat(chatId, newTitle).then(() => refreshChats());
                         }
                         closeMenus();
                         return;
@@ -793,16 +1142,17 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!confirm(translations.confirmDelete[currentLang])) return;
                         deleteChat(chatId).then(success => {
                             if (success) {
-                                if (chatId === activeChatId) {
-                                    activeChatId = null;
-                                    conversationHistory = [];
+                                if (chatId === appState.activeChatId) {
+                                    appState.activeChatId = null;
+                                    appState.highlightedChatId = null;
+                                    appState.conversationHistory = [];
                                     clearChatLog();
                                 }
                                 item.remove();
                                 if (!chatList.children.length) {
                                     renderEmptyState(chatList, 'chatEmpty');
                                 }
-                                fetchChats(chatSearchInput?.value?.trim() || '');
+                                refreshChats();
                             }
                         });
                         closeMenus();
@@ -810,27 +1160,44 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
+                appState.activeProjectChats = [];
                 loadChatById(chatId);
             });
         }
         if (projectList) {
             projectList.addEventListener('click', (e) => {
+                const recentItem = e.target.closest('.project-recent-item');
+                if (recentItem?.dataset?.chatId) {
+                    loadChatById(recentItem.dataset.chatId);
+                    return;
+                }
                 const actionBtn = e.target.closest('[data-action]');
                 const item = e.target.closest('.sidebar-list-item');
                 if (!item?.dataset?.projectId) return;
                 const projectId = item.dataset.projectId;
+                const projectName = item.dataset.projectName || '';
 
                 if (actionBtn) {
                     const action = actionBtn.dataset.action;
+                    if (action === 'toggle-project') {
+                        e.stopPropagation();
+                        if (appState.expandedProjectIds.has(projectId)) {
+                            appState.expandedProjectIds.delete(projectId);
+                        } else {
+                            appState.expandedProjectIds.add(projectId);
+                        }
+                        renderProjectList(appState.cachedProjects);
+                        return;
+                    }
                     if (action === 'menu') {
                         e.stopPropagation();
-                        if (openMenuType === 'project' && openMenuId === projectId) {
+                        if (appState.openMenuType === 'project' && appState.openMenuId === projectId) {
                             closeMenus();
                             return;
                         }
                         closeMenus();
-                        openMenuId = projectId;
-                        openMenuType = 'project';
+                        appState.openMenuId = projectId;
+                        appState.openMenuType = 'project';
                         item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
                         return;
                     }
@@ -849,7 +1216,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         e.stopPropagation();
                         const newName = prompt(translations.renameProjectPlaceholder[currentLang]);
                         if (newName) {
-                            renameProject(projectId, newName).then(() => fetchProjects());
+                            renameProject(projectId, newName).then((updated) => {
+                                if (updated?.name && projectId === appState.activeProjectId) {
+                                    appState.activeProjectName = updated.name;
+                                    updateHeaderProject();
+                                }
+                                fetchProjects();
+                            });
                         }
                         closeMenus();
                         return;
@@ -857,8 +1230,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (action === 'delete') {
                         e.stopPropagation();
                         if (!confirm(translations.confirmDeleteProject[currentLang])) return;
-                        deleteProject(projectId).then(success => {
+                            deleteProject(projectId).then(success => {
                             if (success) {
+                                if (projectId === appState.activeProjectId) {
+                                    appState.activeProjectId = null;
+                                    appState.activeProjectName = '';
+                                    appState.activeProjectChats = [];
+                                    showChatView();
+                                }
                                 item.remove();
                                 fetchProjects();
                             }
@@ -867,6 +1246,67 @@ document.addEventListener('DOMContentLoaded', () => {
                         return;
                     }
                 }
+
+                setActiveProject(projectId, projectName);
+                appState.expandedProjectIds.add(projectId);
+            });
+        }
+        if (projectChatList) {
+            projectChatList.addEventListener('click', (e) => {
+                const actionBtn = e.target.closest('[data-action]');
+                const item = e.target.closest('.project-chat-item');
+                if (!item?.dataset?.chatId) return;
+                const chatId = item.dataset.chatId;
+
+                if (actionBtn) {
+                    const action = actionBtn.dataset.action;
+                    if (action === 'menu') {
+                        e.stopPropagation();
+                        if (appState.openMenuType === 'project-chat' && appState.openMenuId === chatId) {
+                            closeMenus();
+                            return;
+                        }
+                        closeMenus();
+                        appState.openMenuId = chatId;
+                        appState.openMenuType = 'project-chat';
+                        item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
+                        return;
+                    }
+                    if (action === 'share') {
+                        e.stopPropagation();
+                        shareChat(chatId).then(data => {
+                            if (!data?.url) return;
+                            if (navigator.clipboard?.writeText) {
+                                navigator.clipboard.writeText(data.url);
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'rename') {
+                        e.stopPropagation();
+                        const newTitle = prompt(translations.renamePlaceholder[currentLang]);
+                        if (newTitle) {
+                            renameChat(chatId, newTitle).then(() => fetchProjectChats());
+                        }
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'delete') {
+                        e.stopPropagation();
+                        if (!confirm(translations.confirmDelete[currentLang])) return;
+                        deleteChat(chatId).then(success => {
+                            if (success) {
+                                item.remove();
+                                fetchProjectChats();
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                }
+
+                loadChatById(chatId);
             });
         }
         languageSwitcher.addEventListener('click', (e) => {
@@ -918,6 +1358,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (created) {
                 hideProjectModal();
                 fetchProjects();
+                setActiveProject(created.id, created.name);
             }
         };
 
@@ -943,17 +1384,23 @@ document.addEventListener('DOMContentLoaded', () => {
         // 处理浏览器前进/后退按钮
         window.addEventListener('popstate', (e) => {
             const path = window.location.pathname;
-            if (path === '/chat') {
-                body.classList.remove('show-initial-view');
-                body.classList.add('show-chat-view');
-                languageSwitcher.style.display = 'none';
-                fetchProjects();
-                fetchChats(chatSearchInput?.value?.trim() || '');
-                const chatId = new URLSearchParams(window.location.search).get('chat_id');
-                if (chatId) {
-                    loadChatById(chatId);
-                }
+        if (path === '/chat' || path === '/project') {
+            body.classList.remove('show-initial-view');
+            body.classList.add('show-chat-view');
+            languageSwitcher.style.display = 'none';
+            refreshSidebarLists();
+            const searchParams = new URLSearchParams(window.location.search);
+            const chatId = searchParams.get('chat_id');
+            const projectId = searchParams.get('project_id');
+            if (chatId) {
+                loadChatById(chatId);
+                showChatView();
+            } else if (projectId) {
+                setActiveProject(projectId, '', { updateHistory: false });
             } else {
+                showChatView();
+            }
+        } else {
                 body.classList.add('show-initial-view');
                 body.classList.remove('show-chat-view');
                 languageSwitcher.style.display = 'flex';
