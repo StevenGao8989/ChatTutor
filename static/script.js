@@ -26,6 +26,11 @@ document.addEventListener('DOMContentLoaded', () => {
         deleteChat: { zh: "删除对话", en: "Delete chat" },
         confirmDelete: { zh: "确定删除该对话？", en: "Delete this chat?" },
         renamePlaceholder: { zh: "输入新的对话名称", en: "Enter a new chat name" },
+        shareProject: { zh: "分享项目", en: "Share project" },
+        renameProject: { zh: "重命名项目", en: "Rename project" },
+        deleteProject: { zh: "删除项目", en: "Delete project" },
+        confirmDeleteProject: { zh: "确定删除该项目？", en: "Delete this project?" },
+        renameProjectPlaceholder: { zh: "输入新的项目名称", en: "Enter a new project name" },
         createProject: { zh: "新建项目", en: "New project" },
         projectName: { zh: "项目名称", en: "Project name" },
         projectHint: { zh: "用于归档对话与文件。", en: "Keep related chats and files together." },
@@ -95,6 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let placeholderInterval;
     let activeChatId = null;
     let openMenuId = null;
+    let openMenuType = null;
 
     async function handleFormSubmit(e) {
         e.preventDefault();
@@ -383,11 +389,22 @@ document.addEventListener('DOMContentLoaded', () => {
         projects.forEach(project => {
             const item = document.createElement('div');
             item.className = 'sidebar-list-item';
+            item.dataset.projectId = project.id;
             item.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M4 6h16M4 10h16M4 14h10"/><path d="M4 18h6"/>
                 </svg>
-                <span>${project.name}</span>
+                <span class="sidebar-title">${project.name}</span>
+                <button class="sidebar-item-menu project-menu" title="更多" data-action="menu">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
+                    </svg>
+                </button>
+                <div class="sidebar-item-dropdown ${openMenuType === 'project' && openMenuId === project.id ? 'open' : ''}">
+                    <button data-action="share">${translations.shareProject[currentLang]}</button>
+                    <button data-action="rename">${translations.renameProject[currentLang]}</button>
+                    <button data-action="delete" class="danger">${translations.deleteProject[currentLang]}</button>
+                </div>
             `;
             projectList.appendChild(item);
         });
@@ -416,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
                     </svg>
                 </button>
-                <div class="sidebar-item-dropdown ${openMenuId === chat.id ? 'open' : ''}">
+                <div class="sidebar-item-dropdown ${openMenuType === 'chat' && openMenuId === chat.id ? 'open' : ''}">
                     <button data-action="share">${translations.shareChat[currentLang]}</button>
                     <button data-action="rename">${translations.renameChat[currentLang]}</button>
                     <button data-action="delete" class="danger">${translations.deleteChat[currentLang]}</button>
@@ -445,6 +462,55 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ name })
             });
             if (!response.ok) throw new Error('Failed to create project');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const renameProject = async (projectId, name) => {
+        const payload = JSON.stringify({ name });
+        const tryRename = async (url, method) => {
+            try {
+                const response = await fetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload
+                });
+                if (!response.ok) throw new Error('Failed to rename project');
+                return await response.json();
+            } catch (error) {
+                return null;
+            }
+        };
+
+        const baseUrl = `${config.apiBaseUrl}/api/projects/${projectId}`;
+        const renamed = await tryRename(baseUrl, 'PATCH');
+        if (renamed) return renamed;
+        return await tryRename(`${baseUrl}/rename`, 'POST');
+    };
+
+    const deleteProject = async (projectId) => {
+        const tryDelete = async (url, method) => {
+            try {
+                const response = await fetch(url, { method });
+                if (!response.ok) throw new Error('Failed to delete project');
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const baseUrl = `${config.apiBaseUrl}/api/projects/${projectId}`;
+        const removed = await tryDelete(baseUrl, 'DELETE');
+        if (removed) return true;
+        return await tryDelete(`${baseUrl}/delete`, 'POST');
+    };
+
+    const shareProject = async (projectId) => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/projects/${projectId}/share`);
+            if (!response.ok) throw new Error('Failed to share project');
             return await response.json();
         } catch (error) {
             return null;
@@ -576,6 +642,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const closeMenus = () => {
         openMenuId = null;
+        openMenuType = null;
         document.querySelectorAll('.sidebar-item-dropdown.open').forEach(el => el.classList.remove('open'));
     };
 
@@ -691,12 +758,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     const action = actionBtn.dataset.action;
                     if (action === 'menu') {
                         e.stopPropagation();
-                        if (openMenuId === chatId) {
+                        if (openMenuType === 'chat' && openMenuId === chatId) {
                             closeMenus();
                             return;
                         }
                         closeMenus();
                         openMenuId = chatId;
+                        openMenuType = 'chat';
                         item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
                         return;
                     }
@@ -743,6 +811,62 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 loadChatById(chatId);
+            });
+        }
+        if (projectList) {
+            projectList.addEventListener('click', (e) => {
+                const actionBtn = e.target.closest('[data-action]');
+                const item = e.target.closest('.sidebar-list-item');
+                if (!item?.dataset?.projectId) return;
+                const projectId = item.dataset.projectId;
+
+                if (actionBtn) {
+                    const action = actionBtn.dataset.action;
+                    if (action === 'menu') {
+                        e.stopPropagation();
+                        if (openMenuType === 'project' && openMenuId === projectId) {
+                            closeMenus();
+                            return;
+                        }
+                        closeMenus();
+                        openMenuId = projectId;
+                        openMenuType = 'project';
+                        item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
+                        return;
+                    }
+                    if (action === 'share') {
+                        e.stopPropagation();
+                        shareProject(projectId).then(data => {
+                            if (!data?.url) return;
+                            if (navigator.clipboard?.writeText) {
+                                navigator.clipboard.writeText(data.url);
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'rename') {
+                        e.stopPropagation();
+                        const newName = prompt(translations.renameProjectPlaceholder[currentLang]);
+                        if (newName) {
+                            renameProject(projectId, newName).then(() => fetchProjects());
+                        }
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'delete') {
+                        e.stopPropagation();
+                        if (!confirm(translations.confirmDeleteProject[currentLang])) return;
+                        deleteProject(projectId).then(success => {
+                            if (success) {
+                                item.remove();
+                                fetchProjects();
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                }
             });
         }
         languageSwitcher.addEventListener('click', (e) => {

@@ -100,6 +100,9 @@ class RenameChatRequest(BaseModel):
 class NewProjectRequest(BaseModel):
     name: str
 
+class RenameProjectRequest(BaseModel):
+    name: str
+
 def now_iso() -> str:
     return datetime.now(shanghai_tz).isoformat()
 
@@ -241,6 +244,41 @@ async def create_project(payload: NewProjectRequest):
     project = Project(id=uuid.uuid4().hex, name=name, updated_at=now_iso())
     PROJECTS.insert(0, project)
     return project
+
+@app.patch("/api/projects/{project_id}", response_model=Project)
+async def rename_project(project_id: str, payload: RenameProjectRequest):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+    for project in PROJECTS:
+        if project.id == project_id:
+            project.name = name
+            project.updated_at = now_iso()
+            return project
+    raise HTTPException(status_code=404, detail="Project not found")
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str):
+    for index, project in enumerate(PROJECTS):
+        if project.id == project_id:
+            PROJECTS.pop(index)
+            return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="Project not found")
+
+@app.post("/api/projects/{project_id}/rename", response_model=Project)
+async def rename_project_post(project_id: str, payload: RenameProjectRequest):
+    return await rename_project(project_id, payload)
+
+@app.post("/api/projects/{project_id}/delete")
+async def delete_project_post(project_id: str):
+    return await delete_project(project_id)
+
+@app.get("/api/projects/{project_id}/share")
+async def share_project(project_id: str, request: Request):
+    exists = any(project.id == project_id for project in PROJECTS)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"url": str(request.base_url).rstrip("/") + f"/chat?project_id={project_id}"}
 
 @app.get("/api/chats", response_model=List[ChatSummary])
 async def list_chats(request: Request):
