@@ -16,9 +16,24 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         newChat: { zh: "新对话", en: "New Chat" },
         newChatTitle: { zh: "新对话", en: "New Chat" },
+        searchChats: { zh: "搜索对话", en: "Search chats" },
+        projects: { zh: "项目", en: "Projects" },
+        recentChats: { zh: "对话", en: "Chats" },
+        chatEmpty: { zh: "暂无对话", en: "No chats yet" },
+        projectEmpty: { zh: "暂无项目", en: "No projects yet" },
+        shareChat: { zh: "分享对话", en: "Share chat" },
+        renameChat: { zh: "重命名对话", en: "Rename chat" },
+        deleteChat: { zh: "删除对话", en: "Delete chat" },
+        confirmDelete: { zh: "确定删除该对话？", en: "Delete this chat?" },
+        renamePlaceholder: { zh: "输入新的对话名称", en: "Enter a new chat name" },
+        createProject: { zh: "新建项目", en: "New project" },
+        projectName: { zh: "项目名称", en: "Project name" },
+        projectHint: { zh: "用于归档对话与文件。", en: "Keep related chats and files together." },
+        createProjectAction: { zh: "创建项目", en: "Create project" },
+        projectNamePlaceholder: { zh: "例如：市场调研", en: "e.g. Market research" },
         chatPlaceholder: {
-            zh: "AI 生成结果具有随机性，您可在此输入修改意见",
-            en: "Results are random. Enter your modifications here for adjustments."
+            zh: "Ask anything",
+            en: "Ask anything"
         },
         sendTitle: { zh: "发送", en: "Send" },
         agentThinking: { zh: "ChatTutor 正在进行思考与规划，请稍后。这可能需要数十秒至数分钟...", en: "ChatTutor is thinking and planning, please wait..." },
@@ -48,6 +63,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const featureModal = document.getElementById('feature-modal');
     const modalGitHubButton = document.getElementById('modal-github-button');
     const modalCloseButton = document.getElementById('modal-close-button');
+    const projectModal = document.getElementById('project-modal');
+    const projectModalClose = document.getElementById('project-modal-close');
+    const projectCreateButton = document.getElementById('project-create-button');
+    const projectNameInput = document.getElementById('project-name-input');
+    const projectCreateSubmit = document.getElementById('project-create-submit');
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+    const chatSidebar = document.querySelector('.chat-sidebar');
+    const chatSearchInput = document.getElementById('chat-search-input');
+    const chatList = document.getElementById('chat-list');
+    const projectList = document.getElementById('project-list');
 
     const templates = {
         user: document.getElementById('user-message-template'),
@@ -68,8 +93,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let conversationHistory = [];
     let accumulatedCode = '';
     let placeholderInterval;
+    let activeChatId = null;
+    let openMenuId = null;
 
-    function handleFormSubmit(e) {
+    async function handleFormSubmit(e) {
         e.preventDefault();
         const isInitial = e.currentTarget.id === 'initial-form';
         const submitButton = isInitial
@@ -85,14 +112,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (isInitial) switchToChatView();
 
+        if (!activeChatId) {
+            const newChat = await createChat(topic);
+            activeChatId = newChat?.id || null;
+            fetchChats(chatSearchInput?.value?.trim() || '');
+        }
+
         conversationHistory.push({ role: 'user', content: topic });
-        startGeneration(topic);
+        appendMessageToChat(activeChatId, 'user', topic);
+        startGeneration(topic, activeChatId);
         input.value = '';
         if (isInitial) placeholderContainer?.classList?.remove('hidden');
     }
 
-    async function startGeneration(topic) {
+    async function startGeneration(topic, chatId) {
         console.log('Getting generation from backend.');
+        const welcomeMessage = document.getElementById('chat-welcome');
+        if (welcomeMessage) {
+            welcomeMessage.style.display = 'none';
+        }
         appendUserMessage(topic);
         const agentThinkingMessage = appendAgentStatus(translations.agentThinking[currentLang]);
         const submitButton = document.querySelector('.submit-button');
@@ -132,6 +170,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (jsonStr.includes('[DONE]')) {
                         console.log('Streaming complete');
                         conversationHistory.push({ role: 'assistant', content: accumulatedCode });
+                        appendMessageToChat(chatId, 'assistant', accumulatedCode);
+                        fetchChats(chatSearchInput?.value?.trim() || '');
 
                         if (!codeBlockElement) {
                             console.warn('No code block element created. Full response:', accumulatedCode);
@@ -214,7 +254,12 @@ document.addEventListener('DOMContentLoaded', () => {
         body.classList.remove('show-initial-view');
         body.classList.add('show-chat-view');
         languageSwitcher.style.display = 'none';
-        document.getElementById('logo-chat').style.display = 'block';
+        fetchProjects();
+        fetchChats();
+        // 更新URL为 /chat，但不刷新页面
+        if (window.location.pathname !== '/chat') {
+            window.history.pushState({ view: 'chat' }, '', '/chat');
+        }
     }
 
     function appendFromTemplate(template, text) {
@@ -314,6 +359,226 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const scrollToBottom = () => chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
 
+    const formatTime = (isoString) => {
+        if (!isoString) return '';
+        const date = new Date(isoString);
+        if (Number.isNaN(date.getTime())) return '';
+        return date.toLocaleDateString(currentLang === 'zh' ? 'zh-CN' : 'en-US', {
+            month: 'short',
+            day: 'numeric'
+        });
+    };
+
+    const renderEmptyState = (container, key) => {
+        container.innerHTML = `<div class="sidebar-empty">${translations[key]?.[currentLang] || ''}</div>`;
+    };
+
+    const renderProjectList = (projects = []) => {
+        if (!projectList) return;
+        if (!projects.length) {
+            projectList.innerHTML = '';
+            return;
+        }
+        projectList.innerHTML = '';
+        projects.forEach(project => {
+            const item = document.createElement('div');
+            item.className = 'sidebar-list-item';
+            item.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 6h16M4 10h16M4 14h10"/><path d="M4 18h6"/>
+                </svg>
+                <span>${project.name}</span>
+            `;
+            projectList.appendChild(item);
+        });
+    };
+
+    const renderChatList = (chats = []) => {
+        if (!chatList) return;
+        if (!chats.length) {
+            renderEmptyState(chatList, 'chatEmpty');
+            return;
+        }
+        chatList.innerHTML = '';
+        chats.forEach(chat => {
+            const item = document.createElement('div');
+            item.className = 'sidebar-list-item';
+            if (chat.id === activeChatId) item.classList.add('active');
+            item.dataset.chatId = chat.id;
+            item.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
+                </svg>
+                <span class="sidebar-title">${chat.title || translations.newChat[currentLang]}</span>
+                <span class="sidebar-time">${formatTime(chat.updated_at)}</span>
+                <button class="sidebar-item-menu" title="更多" data-action="menu">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="12" cy="6" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="18" r="1.8"/>
+                    </svg>
+                </button>
+                <div class="sidebar-item-dropdown ${openMenuId === chat.id ? 'open' : ''}">
+                    <button data-action="share">${translations.shareChat[currentLang]}</button>
+                    <button data-action="rename">${translations.renameChat[currentLang]}</button>
+                    <button data-action="delete" class="danger">${translations.deleteChat[currentLang]}</button>
+                </div>
+            `;
+            chatList.appendChild(item);
+        });
+    };
+
+    const fetchProjects = async () => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/projects`);
+            if (!response.ok) throw new Error('Failed to load projects');
+            const data = await response.json();
+            renderProjectList(data);
+        } catch (error) {
+            renderProjectList([]);
+        }
+    };
+
+    const createProject = async (name) => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/projects`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            if (!response.ok) throw new Error('Failed to create project');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const fetchChats = async (query = '') => {
+        try {
+            const url = new URL(`${window.location.origin}${config.apiBaseUrl}/api/chats`);
+            if (query) url.searchParams.set('q', query);
+            const response = await fetch(url.toString());
+            if (!response.ok) throw new Error('Failed to load chats');
+            const data = await response.json();
+            renderChatList(data);
+        } catch (error) {
+            renderChatList([]);
+        }
+    };
+
+    const fetchChatDetail = async (chatId) => {
+        if (!chatId) return;
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}`);
+            if (!response.ok) throw new Error('Failed to load chat');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const renameChat = async (chatId, title) => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title })
+            });
+            if (!response.ok) throw new Error('Failed to rename chat');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const deleteChat = async (chatId) => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error('Failed to delete chat');
+            return true;
+        } catch (error) {
+            return false;
+        }
+    };
+
+    const shareChat = async (chatId) => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/chats/${chatId}/share`);
+            if (!response.ok) throw new Error('Failed to share chat');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const createChat = async (title = '') => {
+        try {
+            const response = await fetch(`${config.apiBaseUrl}/api/chats`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title })
+            });
+            if (!response.ok) throw new Error('Failed to create chat');
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const appendMessageToChat = async (chatId, role, content) => {
+        if (!chatId) return;
+        try {
+            await fetch(`${config.apiBaseUrl}/api/chats/${chatId}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role, content })
+            });
+        } catch (error) {
+            // Ignore to keep UI responsive
+        }
+    };
+
+    const clearChatLog = () => {
+        chatLog.innerHTML = '';
+        const welcome = document.createElement('div');
+        welcome.id = 'chat-welcome';
+        welcome.className = 'chat-welcome';
+        welcome.innerHTML = '<h2>What are you working on?</h2>';
+        chatLog.appendChild(welcome);
+    };
+
+    const addCodeBlockFromContent = (content, title = '') => {
+        const codeBlockElement = appendCodeBlock();
+        const codeElement = codeBlockElement.querySelector('code');
+        if (codeElement) codeElement.textContent = content;
+        markCodeAsComplete(codeBlockElement);
+        if (content) appendAnimationPlayer(content, title);
+    };
+
+    const loadChatById = async (chatId) => {
+        const detail = await fetchChatDetail(chatId);
+        if (!detail) return;
+        activeChatId = chatId;
+        openMenuId = null;
+        conversationHistory = detail.messages || [];
+        clearChatLog();
+        if (conversationHistory.length) {
+            const welcomeMessage = document.getElementById('chat-welcome');
+            if (welcomeMessage) welcomeMessage.style.display = 'none';
+            conversationHistory.forEach(message => {
+                if (message.role === 'user') {
+                    appendUserMessage(message.content);
+                } else if (message.role === 'assistant') {
+                    addCodeBlockFromContent(message.content, detail.title || '');
+                }
+            });
+        }
+        fetchChats(chatSearchInput?.value?.trim() || '');
+    };
+
+    const closeMenus = () => {
+        openMenuId = null;
+        document.querySelectorAll('.sidebar-item-dropdown.open').forEach(el => el.classList.remove('open'));
+    };
+
     function setNextPlaceholder() {
         const placeholderTexts = translations.placeholders[currentLang];
         const newSpan = document.createElement('span');
@@ -350,11 +615,34 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         startPlaceholderAnimation();
         localStorage.setItem('preferredLanguage', lang);
+        if (body.classList.contains('show-chat-view')) {
+            fetchProjects();
+            fetchChats(chatSearchInput?.value?.trim() || '');
+        }
     }
 
     let placeholderIndex = 0;
 
     function init() {
+        // 根据URL路径决定显示哪个视图
+        const path = window.location.pathname;
+        if (path === '/chat') {
+            // 如果是 /chat 路由，直接显示聊天视图
+            body.classList.remove('show-initial-view');
+            body.classList.add('show-chat-view');
+            languageSwitcher.style.display = 'none';
+            fetchProjects();
+            fetchChats();
+            const chatId = new URLSearchParams(window.location.search).get('chat_id');
+            if (chatId) {
+                loadChatById(chatId);
+            }
+        } else {
+            // 默认显示初始视图
+            body.classList.add('show-initial-view');
+            body.classList.remove('show-chat-view');
+        }
+
         initialInput.addEventListener('input', () => {
             placeholderContainer.classList.toggle('hidden', initialInput.value.length > 0);
         });
@@ -365,7 +653,98 @@ document.addEventListener('DOMContentLoaded', () => {
 
         initialForm.addEventListener('submit', handleFormSubmit);
         chatForm.addEventListener('submit', handleFormSubmit);
-        newChatButton.addEventListener('click', () => location.reload());
+        newChatButton.addEventListener('click', async () => {
+            if (window.location.pathname !== '/chat') {
+                window.location.href = '/chat';
+                return;
+            }
+            activeChatId = null;
+            conversationHistory = [];
+            clearChatLog();
+            const newChat = await createChat();
+            activeChatId = newChat?.id || null;
+            fetchChats(chatSearchInput?.value?.trim() || '');
+        });
+        
+        // 侧边栏折叠/展开功能
+        if (sidebarToggle && chatSidebar) {
+            sidebarToggle.addEventListener('click', () => {
+                chatSidebar.classList.toggle('collapsed');
+            });
+        }
+        if (chatSearchInput) {
+            let searchTimer;
+            chatSearchInput.addEventListener('input', (e) => {
+                const query = e.target.value.trim();
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(() => fetchChats(query), 200);
+            });
+        }
+        if (chatList) {
+            chatList.addEventListener('click', (e) => {
+                const actionBtn = e.target.closest('[data-action]');
+                const item = e.target.closest('.sidebar-list-item');
+                if (!item?.dataset?.chatId) return;
+                const chatId = item.dataset.chatId;
+
+                if (actionBtn) {
+                    const action = actionBtn.dataset.action;
+                    if (action === 'menu') {
+                        e.stopPropagation();
+                        if (openMenuId === chatId) {
+                            closeMenus();
+                            return;
+                        }
+                        closeMenus();
+                        openMenuId = chatId;
+                        item.querySelector('.sidebar-item-dropdown')?.classList.add('open');
+                        return;
+                    }
+                    if (action === 'share') {
+                        e.stopPropagation();
+                        shareChat(chatId).then(data => {
+                            if (!data?.url) return;
+                            if (navigator.clipboard?.writeText) {
+                                navigator.clipboard.writeText(data.url);
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'rename') {
+                        e.stopPropagation();
+                        const newTitle = prompt(translations.renamePlaceholder[currentLang]);
+                        if (newTitle) {
+                            renameChat(chatId, newTitle).then(() => fetchChats(chatSearchInput?.value?.trim() || ''));
+                        }
+                        closeMenus();
+                        return;
+                    }
+                    if (action === 'delete') {
+                        e.stopPropagation();
+                        if (!confirm(translations.confirmDelete[currentLang])) return;
+                        deleteChat(chatId).then(success => {
+                            if (success) {
+                                if (chatId === activeChatId) {
+                                    activeChatId = null;
+                                    conversationHistory = [];
+                                    clearChatLog();
+                                }
+                                item.remove();
+                                if (!chatList.children.length) {
+                                    renderEmptyState(chatList, 'chatEmpty');
+                                }
+                                fetchChats(chatSearchInput?.value?.trim() || '');
+                            }
+                        });
+                        closeMenus();
+                        return;
+                    }
+                }
+
+                loadChatById(chatId);
+            });
+        }
         languageSwitcher.addEventListener('click', (e) => {
             const target = e.target.closest('button');
             if (target) setLanguage(target.dataset.lang);
@@ -385,6 +764,44 @@ document.addEventListener('DOMContentLoaded', () => {
             hideModal();
         });
 
+        const hideProjectModal = () => {
+            projectModal?.classList.remove('visible');
+        };
+
+        if (projectCreateButton) {
+            projectCreateButton.addEventListener('click', () => {
+                if (!projectModal) return;
+                projectModal.classList.add('visible');
+                if (projectNameInput) {
+                    projectNameInput.value = '';
+                    projectNameInput.focus();
+                }
+            });
+        }
+
+        projectModalClose?.addEventListener('click', hideProjectModal);
+        projectModal?.addEventListener('click', (e) => {
+            if (e.target === projectModal) hideProjectModal();
+        });
+
+        const submitProject = async () => {
+            const name = projectNameInput?.value.trim() || '';
+            if (!name) {
+                projectNameInput?.focus();
+                return;
+            }
+            const created = await createProject(name);
+            if (created) {
+                hideProjectModal();
+                fetchProjects();
+            }
+        };
+
+        projectCreateSubmit?.addEventListener('click', submitProject);
+        projectNameInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') submitProject();
+        });
+
         const savedLang = localStorage.getItem('preferredLanguage');
         const browserLang = navigator.language?.toLowerCase() || ''; // e.g. 'zh-cn'
 
@@ -398,6 +815,33 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         setLanguage(initialLang);
+
+        // 处理浏览器前进/后退按钮
+        window.addEventListener('popstate', (e) => {
+            const path = window.location.pathname;
+            if (path === '/chat') {
+                body.classList.remove('show-initial-view');
+                body.classList.add('show-chat-view');
+                languageSwitcher.style.display = 'none';
+                fetchProjects();
+                fetchChats(chatSearchInput?.value?.trim() || '');
+                const chatId = new URLSearchParams(window.location.search).get('chat_id');
+                if (chatId) {
+                    loadChatById(chatId);
+                }
+            } else {
+                body.classList.add('show-initial-view');
+                body.classList.remove('show-chat-view');
+                languageSwitcher.style.display = 'flex';
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.sidebar-item-dropdown') || e.target.closest('.sidebar-item-menu')) {
+                return;
+            }
+            closeMenus();
+        });
     }
 
     init();

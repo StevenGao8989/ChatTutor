@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import uuid
 from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
 import pytz
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, OpenAIError
@@ -60,7 +61,7 @@ app = FastAPI(title="AI Animation Backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["*"],
     allow_headers=["Content-Type", "Authorization"],
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -68,6 +69,47 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     topic: str
     history: Optional[List[dict]] = None
+
+class Project(BaseModel):
+    id: str
+    name: str
+    updated_at: str
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatSummary(BaseModel):
+    id: str
+    title: Optional[str]
+    updated_at: str
+
+class ChatDetail(ChatSummary):
+    messages: List[ChatMessage]
+
+class NewChatRequest(BaseModel):
+    title: Optional[str] = None
+
+class ChatMessageRequest(BaseModel):
+    role: str
+    content: str
+
+class RenameChatRequest(BaseModel):
+    title: str
+
+class NewProjectRequest(BaseModel):
+    name: str
+
+def now_iso() -> str:
+    return datetime.now(shanghai_tz).isoformat()
+
+PROJECTS: List[Project] = []
+
+CHAT_STORE: dict = {}
+
+@app.on_event("startup")
+async def reset_project_store():
+    PROJECTS.clear()
 
 # -----------------------------------------------------------------------
 # 2. 核心：流式生成器 (现在会使用 history)
@@ -90,6 +132,8 @@ async def llm_event_stream(
 附带一些旁白式的文字解说,从头到尾讲清楚一个小的知识点
 不需要任何互动按钮,直接开始播放
 使用和谐好看，广泛采用的浅色配色方案，使用很多的，丰富的视觉元素。双语字幕
+**布局要求：使用全屏或接近全屏的布局，主容器应该占据至少80%的视口宽度和70%以上的视口高度，减少不必要的边距和空白，让内容充满整个显示区域，提供沉浸式的视觉体验。主内容区域应该是一个大的、居中的白色或浅色卡片，占据屏幕的大部分空间。**
+**字幕要求：字幕必须放置在动画内容的下方，使用固定定位或绝对定位在容器底部，确保字幕清晰可见且不会遮挡任何动画元素。字幕区域应该有足够的背景色或半透明背景，确保文字可读性。字幕与动画内容之间要有明确的视觉分隔。**
 **请保证任何一个元素都在一个2k分辨率的容器中被摆在了正确的位置，避免穿模，字幕遮挡，图形位置错误等等问题影响正确的视觉传达**
 html+css+js+svg，放进一个html里"""
 
@@ -185,12 +229,114 @@ async def generate(
     }
     return StreamingResponse(wrapped_stream(), headers=headers)
 
+@app.get("/api/projects", response_model=List[Project])
+async def list_projects():
+    return PROJECTS
+
+@app.post("/api/projects", response_model=Project)
+async def create_project(payload: NewProjectRequest):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+    project = Project(id=uuid.uuid4().hex, name=name, updated_at=now_iso())
+    PROJECTS.insert(0, project)
+    return project
+
+@app.get("/api/chats", response_model=List[ChatSummary])
+async def list_chats(request: Request):
+    query = (request.query_params.get("q") or "").strip().lower()
+    chats = list(CHAT_STORE.values())
+    if query:
+        def match_chat(chat):
+            title = (chat["title"] or "").lower()
+            if query in title:
+                return True
+            return any(query in (msg["content"] or "").lower() for msg in chat["messages"])
+        chats = [chat for chat in chats if match_chat(chat)]
+    chats.sort(key=lambda c: c["updated_at"], reverse=True)
+    return [ChatSummary(id=chat["id"], title=chat["title"], updated_at=chat["updated_at"]) for chat in chats]
+
+@app.post("/api/chats", response_model=ChatSummary)
+async def create_chat(payload: NewChatRequest):
+    chat_id = uuid.uuid4().hex
+    title = payload.title.strip() if payload.title else ""
+    chat = {
+        "id": chat_id,
+        "title": title or None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "messages": [],
+    }
+    CHAT_STORE[chat_id] = chat
+    return ChatSummary(id=chat_id, title=chat["title"], updated_at=chat["updated_at"])
+
+@app.get("/api/chats/{chat_id}", response_model=ChatDetail)
+async def get_chat(chat_id: str):
+    chat = CHAT_STORE.get(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatDetail(
+        id=chat["id"],
+        title=chat["title"],
+        updated_at=chat["updated_at"],
+        messages=[ChatMessage(**msg) for msg in chat["messages"]],
+    )
+
+@app.post("/api/chats/{chat_id}/messages", response_model=ChatDetail)
+async def append_message(chat_id: str, payload: ChatMessageRequest):
+    chat = CHAT_STORE.get(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    content = payload.content.strip()
+    chat["messages"].append({"role": payload.role, "content": content})
+    if not chat["title"] and payload.role == "user":
+        chat["title"] = content[:28] if content else "New Chat"
+    chat["updated_at"] = now_iso()
+    return ChatDetail(
+        id=chat["id"],
+        title=chat["title"],
+        updated_at=chat["updated_at"],
+        messages=[ChatMessage(**msg) for msg in chat["messages"]],
+    )
+
+@app.patch("/api/chats/{chat_id}", response_model=ChatSummary)
+async def rename_chat(chat_id: str, payload: RenameChatRequest):
+    chat = CHAT_STORE.get(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    title = payload.title.strip()
+    chat["title"] = title or chat["title"]
+    chat["updated_at"] = now_iso()
+    return ChatSummary(id=chat["id"], title=chat["title"], updated_at=chat["updated_at"])
+
+@app.delete("/api/chats/{chat_id}")
+async def delete_chat(chat_id: str):
+    if chat_id not in CHAT_STORE:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    CHAT_STORE.pop(chat_id, None)
+    return {"status": "ok"}
+
+@app.get("/api/chats/{chat_id}/share")
+async def share_chat(chat_id: str, request: Request):
+    if chat_id not in CHAT_STORE:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"url": str(request.base_url).rstrip("/") + f"/chat?chat_id={chat_id}"}
+
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
     return templates.TemplateResponse(
         "index.html", {
             "request": request,
-            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S")})
+            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
+            "view": "initial"})
+
+@app.get("/chat", response_class=HTMLResponse)
+async def read_chat(request: Request):
+    return templates.TemplateResponse(
+        "index.html", {
+            "request": request,
+            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
+            "view": "chat"})
 
 # -----------------------------------------------------------------------
 # 4. 本地启动命令

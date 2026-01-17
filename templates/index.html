@@ -36,30 +36,73 @@
                 </form>
             </div>
              <footer class="initial-footer">
-                <a href="http://contact.fogsight.ai" data-translate-key="groupChat">联系我们/加入交流群</a>
+                <a href="https://docs.qq.com/doc/DWExhWnBEdmhRVndp" data-translate-key="groupChat" target="_blank">联系我们/加入交流群</a>
             </footer>
         </div>
     </div>
 
     <div id="chat-view" class="chat-view">
-        <header class="chat-header">
-            <button id="new-chat-button" class="new-chat-button" data-translate-key="newChatTitle" title="新对话">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        <aside class="chat-sidebar">
+            <div class="sidebar-header">
+                <img src="/static/logo.png" alt="ChatTutor Logo" class="sidebar-logo">
+                <button class="sidebar-toggle" id="sidebar-toggle" title="切换边栏">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+                </button>
+            </div>
+            <button id="new-chat-button" class="sidebar-new-chat" data-translate-key="newChatTitle" title="新对话">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                 <span data-translate-key="newChat">新对话</span>
             </button>
-            <img src="/static/logo.png" alt="Studio Logo" class="logo" id="logo-chat">
-        </header>
-        <main id="chat-log" class="chat-log"></main>
-        <footer class="chat-footer">
-            <form id="chat-form" class="chat-form">
-                <div class="input-container">
-                    <input type="text" id="chat-input" data-translate-key="chatPlaceholder" placeholder="AI 生成结果具有随机性，您可在此输入修改意见，通过多轮对话调整结果" autocomplete="off" required>
-                    <button type="submit" class="submit-button" data-translate-key="sendTitle" title="发送">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            <div class="sidebar-search">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <input id="chat-search-input" type="text" data-translate-key="searchChats" placeholder="搜索对话" autocomplete="off">
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <div class="nav-title-row">
+                        <div class="nav-title" data-translate-key="projects">Projects</div>
+                        <button id="project-create-button" class="nav-icon-button" title="新建项目" data-translate-key="createProject">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                        </button>
+                    </div>
+                    <div id="project-list" class="sidebar-list"></div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-title" data-translate-key="recentChats">Chats</div>
+                    <div id="chat-list" class="sidebar-list"></div>
+                </div>
+            </nav>
+        </aside>
+        <div class="chat-main">
+            <header class="chat-header">
+                <div class="header-title">
+                    <span>ChatTutor</span>
+                </div>
+                <div class="header-actions">
+                    <button class="header-action-btn" title="用户设置">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                     </button>
                 </div>
-            </form>
-        </footer>
+            </header>
+            <main id="chat-log" class="chat-log">
+                <div id="chat-welcome" class="chat-welcome">
+                    <h2>What are you working on?</h2>
+                </div>
+            </main>
+            <footer class="chat-footer">
+                <form id="chat-form" class="chat-form">
+                    <div class="input-container">
+                        <button type="button" class="input-attach" title="附加文件">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                        </button>
+                        <input type="text" id="chat-input" data-translate-key="chatPlaceholder" placeholder="Ask anything" autocomplete="off" required>
+                        <button type="submit" class="submit-button" data-translate-key="sendTitle" title="发送">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </div>
+                </form>
+            </footer>
+        </div>
     </div>
 
 
@@ -128,6 +171,19 @@
             <button id="modal-close-button" class="modal-close-button" title="Close">×</button>
             <p data-translate-key="featureComingSoon">该功能正在开发中...</p>
             <button id="modal-github-button" class="modal-button" data-translate-key="visitGitHub">访问 GitHub</button>
+        </div>
+    </div>
+
+    <div id="project-modal" class="modal-overlay">
+        <div class="modal-content project-modal-content">
+            <button id="project-modal-close" class="modal-close-button" title="Close">×</button>
+            <h3 data-translate-key="createProject">新建项目</h3>
+            <div class="project-form">
+                <label data-translate-key="projectName">项目名称</label>
+                <input type="text" id="project-name-input" placeholder="例如：市场调研" data-translate-key="projectNamePlaceholder">
+                <p class="project-hint" data-translate-key="projectHint">用于归档对话与文件。</p>
+                <button id="project-create-submit" class="modal-button" data-translate-key="createProjectAction">创建项目</button>
+            </div>
         </div>
     </div>
 
