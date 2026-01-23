@@ -77,13 +77,6 @@
             <header class="chat-header">
                 <div class="header-title">
                     <span id="header-app-title">ChatTutor</span>
-                    <span id="header-project" class="header-project hidden">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M4 7h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/>
-                            <path d="M4 7l2-3h6l2 3"/>
-                        </svg>
-                        <span id="header-project-name">Project</span>
-                    </span>
                 </div>
                 <div class="header-actions">
                     <button class="header-action-btn" title="用户设置">
@@ -103,21 +96,23 @@
                         </div>
                         <button class="project-add-files" type="button" data-translate-key="addFiles">Add files</button>
                     </div>
+                </div>
+                <div class="project-composer">
                     <form id="project-chat-form" class="project-chat-form">
-                        <button type="submit" class="project-chat-add" aria-label="New chat">
+                        <button type="button" class="project-chat-add" title="添加" aria-label="添加">
                             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M12 5v14M5 12h14"/>
                             </svg>
                         </button>
-                        <input id="project-chat-input" type="text" autocomplete="off" placeholder="New chat in project">
+                        <input id="project-chat-input" type="text" autocomplete="off" data-translate-key="projectChatPlaceholder" placeholder="在 {project} 中新建对话">
                         <div class="project-chat-actions">
-                            <button type="button" class="project-chat-icon" title="Voice">
+                            <button type="button" class="project-chat-icon" title="Voice" aria-label="Voice">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M12 1v22"/>
                                     <path d="M8 6a4 4 0 0 1 8 0v6a4 4 0 0 1-8 0z"/>
                                 </svg>
                             </button>
-                            <button type="button" class="project-chat-icon" title="Quick audio">
+                            <button type="button" class="project-chat-icon" title="Quick audio" aria-label="Quick audio">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M3 12h4l3 8 4-16 3 8h4"/>
                                 </svg>
@@ -126,6 +121,32 @@
                     </form>
                 </div>
                 <div id="project-chat-list" class="project-chat-list"></div>
+            </section>
+            <section id="new-chat-view" class="new-chat-view">
+                <div class="new-chat-hero">
+                    <h2 class="new-chat-welcome" data-translate-key="newChatWelcome">我们从哪开始？</h2>
+                    <form id="new-chat-form" class="new-chat-form">
+                        <button type="submit" class="new-chat-add" aria-label="New chat">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                        </button>
+                        <input id="new-chat-input" type="text" autocomplete="off" data-translate-key="chatPlaceholder" placeholder="Ask anything">
+                        <div class="new-chat-actions">
+                            <button type="button" class="new-chat-icon" title="Voice">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 1v22"/>
+                                    <path d="M8 6a4 4 0 0 1 8 0v6a4 4 0 0 1-8 0z"/>
+                                </svg>
+                            </button>
+                            <button type="button" class="new-chat-icon" title="Quick audio">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M3 12h4l3 8 4-16 3 8h4"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
             </section>
             <main id="chat-log" class="chat-log">
                 <div id="chat-welcome" class="chat-welcome">
@@ -191,18 +212,49 @@
         <div class="message-group agent has-player">
             <div class="player-container">
                 <div class="iframe-wrapper"><iframe class="animation-iframe" sandbox="allow-scripts allow-same-origin"></iframe></div>
-                <div class="player-actions">
-                    <button class="action-button open-new-window">
-                        <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                        <span data-translate-key="openInNewWindow">在新窗口中打开</span>
+                <div class="player-controls-bar">
+                    <button class="control-btn play-pause-btn" type="button" title="播放/暂停">
+                        <svg class="play-icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M8 5v14l11-7z"/>
+                        </svg>
+                        <svg class="pause-icon" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
+                        </svg>
                     </button>
-                    <button class="action-button save-html">
-                        <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                        <span data-translate-key="saveAsHTML">保存为 HTML</span>
-                    </button>
-                    <button class="action-button export-video">
-                        <svg viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 10l4.553 -2.276a1 1 0 0 1 1.447 .894v6.764a1 1 0 0 1 -1.447 .894l-4.553 -2.276v-4z" /><path d="M3 6m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z" /></svg>
-                        <span data-translate-key="exportAsVideo">导出为视频</span>
+                    <div class="volume-control-wrapper">
+                        <button class="control-btn volume-btn" type="button" title="音量">
+                            <svg class="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+                                <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                            </svg>
+                            <svg class="mute-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                                <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+                                <line x1="23" y1="9" x2="17" y2="15"/>
+                                <line x1="17" y1="9" x2="23" y2="15"/>
+                            </svg>
+                        </button>
+                        <div class="volume-slider-container">
+                            <input type="range" class="volume-slider" min="0" max="1" step="0.01" value="1.0">
+                        </div>
+                    </div>
+                    <div class="time-display">
+                        <span class="current-time">00:00</span>
+                        <span class="time-separator">/</span>
+                        <span class="total-time">00:00</span>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-filled"></div>
+                            <div class="progress-handle"></div>
+                        </div>
+                    </div>
+                    <button class="control-btn fullscreen-btn" type="button" title="全屏">
+                        <svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                        </svg>
+                        <svg class="exit-fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                            <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+                        </svg>
                     </button>
                 </div>
             </div>

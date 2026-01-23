@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
 import pytz
+import httpx
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel
@@ -27,7 +28,12 @@ with open("credentials.json", "r") as f:
     credentials = json.load(f)
 API_KEY = credentials["API_KEY"]
 BASE_URL = credentials.get("BASE_URL", "")
-MODEL = credentials.get("MODEL", "gemini-2.5-pro")
+MODEL = credentials.get("MODEL", "gemini-3-pro-preview")
+# Qwen TTS API 配置
+QWEN_TTS_API_KEY = credentials.get("QWEN_TTS_API_KEY", "")
+QWEN_TTS_BASE_URL = credentials.get("Base_TTS_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+# 使用 Qwen TTS
+USE_QWEN_TTS = bool(QWEN_TTS_API_KEY)
 
 if API_KEY.startswith("sk-"):
     # 为 OpenRouter 添加应用标识
@@ -106,8 +112,31 @@ class NewProjectRequest(BaseModel):
 class RenameProjectRequest(BaseModel):
     name: str
 
+class TTSRequest(BaseModel):
+    text: str
+    language: Optional[str] = "auto"  # "zh", "en", or "auto"
+    speed: Optional[float] = 1.0
+
 def now_iso() -> str:
     return datetime.now(shanghai_tz).isoformat()
+
+def detect_language(text: str) -> str:
+    """
+    检测文本语言
+    返回: 'zh' (中文) 或 'en' (英文)
+    """
+    if not text:
+        return 'en'
+    
+    # 检测中文字符
+    chinese_char_count = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+    total_char_count = sum(1 for char in text if char.isalpha())
+    
+    # 如果中文字符占比超过30%，认为是中文
+    if total_char_count > 0 and chinese_char_count / total_char_count > 0.3:
+        return 'zh'
+    
+    return 'en'
 
 # 使用字典优化查找性能 O(1) 替代 O(n)
 PROJECTS_DICT: dict[str, Project] = {}
@@ -138,15 +167,21 @@ async def llm_event_stream(
     if model is None:
         model = MODEL
     
+    # 字幕语言要求：强制使用中文
+    subtitle_requirement = """**字幕语言要求（严格）：字幕必须100%使用中文，绝对不允许出现任何英文单词、英文句子或混合语言。所有字幕内容必须完全用中文表达，包括专业术语也要用中文。无论用户输入什么语言，生成的字幕必须全部是中文，这是强制要求。**"""
+    subtitle_lang_note = "（必须全部中文，禁止英文）"
+    
     # The system prompt is now more focused
     system_prompt = f"""请你生成一个非常精美的动态动画,讲讲 {topic}
 要动态的,要像一个完整的,正在播放的视频。包含一个完整的过程，能把知识点讲清楚。
 页面极为精美，好看，有设计感，同时能够很好的传达知识。知识和图像要准确
 附带一些旁白式的文字解说,从头到尾讲清楚一个小的知识点
 不需要任何互动按钮,直接开始播放
-使用和谐好看，广泛采用的浅色配色方案，使用很多的，丰富的视觉元素。双语字幕
+使用和谐好看，广泛采用的浅色配色方案，使用很多的，丰富的视觉元素。
+{subtitle_requirement}
 **布局要求：使用全屏或接近全屏的布局，主容器应该占据至少80%的视口宽度和70%以上的视口高度，减少不必要的边距和空白，让内容充满整个显示区域，提供沉浸式的视觉体验。主内容区域应该是一个大的、居中的白色或浅色卡片，占据屏幕的大部分空间。**
-**字幕要求：字幕必须放置在动画内容的下方，使用固定定位或绝对定位在容器底部，确保字幕清晰可见且不会遮挡任何动画元素。字幕区域应该有足够的背景色或半透明背景，确保文字可读性。字幕与动画内容之间要有明确的视觉分隔。**
+**字幕要求：字幕必须放置在动画内容的下方，使用固定定位或绝对定位在容器底部，确保字幕清晰可见且不会遮挡任何动画元素。字幕区域应该有足够的背景色或半透明背景，确保文字可读性。字幕与动画内容之间要有明确的视觉分隔。字幕内容{subtitle_lang_note}**
+**字幕元素标识要求：所有字幕文本必须包含在具有 class="subtitle-text" 或 id="subtitle" 的元素中，每个字幕段落应该是一个独立的元素，便于程序识别和朗读。如果有多段字幕，每个字幕元素都应该有 class="subtitle-text"。**
 **请保证任何一个元素都在一个2k分辨率的容器中被摆在了正确的位置，避免穿模，字幕遮挡，图形位置错误等等问题影响正确的视觉传达**
 html+css+js+svg，放进一个html里"""
 
@@ -428,8 +463,10 @@ async def rename_chat(chat_id: str, payload: RenameChatRequest):
         chat = CHAT_STORE.get(chat_id)
         if not chat:
             raise HTTPException(status_code=404, detail="Chat not found")
-        title = payload.title.strip()
-        chat["title"] = title or chat["title"]
+        title = payload.title.strip() if payload.title else ""
+        # 如果提供了标题，则更新（即使为空字符串也要更新）
+        if payload.title is not None:
+            chat["title"] = title if title else None
         chat["updated_at"] = now_iso()
         chat_copy = dict(chat)
     return ChatSummary(
@@ -453,6 +490,144 @@ async def share_chat(chat_id: str, request: Request):
         if chat_id not in CHAT_STORE:
             raise HTTPException(status_code=404, detail="Chat not found")
     return {"url": str(request.base_url).rstrip("/") + f"/chat?chat_id={chat_id}"}
+
+@app.post("/api/tts/generate")
+async def generate_tts(payload: TTSRequest):
+    """
+    生成 TTS 音频
+    使用 Qwen TTS API
+    注意：由于系统提示词要求字幕必须全部中文（subtitle_lang_note），
+    所以 TTS 默认使用中文语音，确保与字幕语言一致
+    """
+    if not USE_QWEN_TTS or not QWEN_TTS_API_KEY:
+        raise HTTPException(status_code=500, detail="Qwen TTS API key not configured. Please set QWEN_TTS_API_KEY and Base_TTS_URL in credentials.json")
+    
+    # 文本预处理
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    
+    # 限制文本长度（避免超长文本）
+    if len(text) > 1000:
+        raise HTTPException(status_code=400, detail="Text too long (max 1000 characters)")
+    
+    # 限制速度范围
+    speed = max(0.25, min(4.0, payload.speed))
+    
+    # 检测字幕语言并选择语音
+    # 注意：由于系统提示词中 subtitle_lang_note 要求字幕必须全部中文，
+    # 所以即使传入 "auto"，也默认使用中文，确保与字幕语言要求一致
+    if payload.language == "auto":
+        # 字幕强制使用中文（与 subtitle_lang_note 保持一致）
+        detected_lang = "zh"
+    else:
+        detected_lang = payload.language
+    
+    try:
+        # Qwen TTS API 端点
+        # 从 Base_TTS_URL 中提取基础 URL（移除 compatible-mode/v1）
+        base_url = QWEN_TTS_BASE_URL.replace("/compatible-mode/v1", "").rstrip("/")
+        if not base_url:
+            # 如果 Base_TTS_URL 就是 compatible-mode/v1，使用默认的 dashscope 域名
+            base_url = "https://dashscope.aliyuncs.com"
+        
+        tts_url = f"{base_url}/api/v1/services/audio/tts/generation"
+        
+        # 根据语言选择 Qwen TTS 语音
+        # Qwen TTS 支持的语音：Cherry, Breeze, 等
+        # 中文推荐：Cherry, Breeze
+        # 英文推荐：Cherry
+        if detected_lang == "zh":
+            voice = "Cherry"  # 中文语音
+            language_type = "Chinese"
+        else:
+            voice = "Cherry"  # 英文语音
+            language_type = "English"
+        
+        # 标准 Qwen TTS API 格式
+        request_body = {
+            "model": "qwen3-tts-flash",  # Qwen TTS 模型名称
+            "input": {
+                "text": text,
+                "voice": voice,
+                "language_type": language_type,
+            },
+            "parameters": {
+                "speed": speed,
+            }
+        }
+        
+        # 调用 Qwen TTS API
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                tts_url,
+                headers={
+                    "Authorization": f"Bearer {QWEN_TTS_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=request_body,
+            )
+            
+            if response.status_code != 200:
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get("message", error_json.get("error", {}).get("message", error_detail))
+                except:
+                    pass
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Qwen TTS API error: {error_detail}"
+                )
+            
+            # Qwen TTS 返回 JSON 格式，包含 base64 编码的音频数据
+            result = response.json()
+            
+            # 检查响应格式
+            if "output" in result and "audio" in result["output"]:
+                # 标准格式：output.audio 包含 base64 编码的音频
+                import base64
+                audio_data = base64.b64decode(result["output"]["audio"])
+                return Response(
+                    content=audio_data,
+                    media_type="audio/mpeg",
+                    headers={
+                        "Cache-Control": "public, max-age=31536000",
+                    }
+                )
+            elif "data" in result and "audio" in result["data"]:
+                # 可能的其他格式
+                import base64
+                audio_data = base64.b64decode(result["data"]["audio"])
+                return Response(
+                    content=audio_data,
+                    media_type="audio/mpeg",
+                    headers={
+                        "Cache-Control": "public, max-age=31536000",
+                    }
+                )
+            else:
+                # 如果返回的是直接音频流（某些情况下）
+                content_type = response.headers.get("content-type", "")
+                if "audio" in content_type:
+                    return Response(
+                        content=response.content,
+                        media_type=content_type,
+                        headers={
+                            "Cache-Control": "public, max-age=31536000",
+                        }
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail=f"Invalid Qwen TTS response format: {result}")
+    
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Qwen TTS API request timeout")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Qwen TTS API request failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Qwen TTS error: {str(e)}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_index(request: Request):
