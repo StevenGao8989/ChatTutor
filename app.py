@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import os
 import uuid
 from datetime import datetime
@@ -76,6 +77,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class ChatRequest(BaseModel):
     topic: str
     history: Optional[List[dict]] = None
+    mode: Optional[str] = "animation"  # "animation" 或 "text"
 
 class Project(BaseModel):
     id: str
@@ -116,6 +118,9 @@ class TTSRequest(BaseModel):
     text: str
     language: Optional[str] = "auto"  # "zh", "en", or "auto"
     speed: Optional[float] = 1.0
+
+class ModelGenerateRequest(BaseModel):
+    prompt: str
 
 def now_iso() -> str:
     return datetime.now(shanghai_tz).isoformat()
@@ -160,6 +165,7 @@ async def llm_event_stream(
     topic: str,
     history: Optional[List[dict]] = None,
     model: str = None, # Will use MODEL from config if not specified
+    mode: str = "animation",  # "animation" 或 "text"
 ) -> AsyncGenerator[str, None]:
     history = history or []
     
@@ -167,12 +173,21 @@ async def llm_event_stream(
     if model is None:
         model = MODEL
     
-    # 字幕语言要求：强制使用中文
-    subtitle_requirement = """**字幕语言要求（严格）：字幕必须100%使用中文，绝对不允许出现任何英文单词、英文句子或混合语言。所有字幕内容必须完全用中文表达，包括专业术语也要用中文。无论用户输入什么语言，生成的字幕必须全部是中文，这是强制要求。**"""
-    subtitle_lang_note = "（必须全部中文，禁止英文）"
-    
-    # The system prompt is now more focused
-    system_prompt = f"""请你生成一个非常精美的动态动画,讲讲 {topic}
+    # 根据模式选择不同的系统提示词
+    if mode == "text":
+        # 文字对话模式
+        system_prompt = """你是一个友好的AI助手，擅长用清晰、易懂的方式回答问题。
+请用中文回答用户的问题，回答要准确、详细、有条理。
+如果问题涉及复杂概念，请用通俗易懂的语言解释，可以适当举例说明。
+回答要自然流畅，就像在和朋友聊天一样。"""
+    else:
+        # 动画生成模式（默认）
+        # 字幕语言要求：强制使用中文
+        subtitle_requirement = """**字幕语言要求（严格）：字幕必须100%使用中文，绝对不允许出现任何英文单词、英文句子或混合语言。所有字幕内容必须完全用中文表达，包括专业术语也要用中文。无论用户输入什么语言，生成的字幕必须全部是中文，这是强制要求。**"""
+        subtitle_lang_note = "（必须全部中文，禁止英文）"
+        
+        # The system prompt is now more focused
+        system_prompt = f"""请你生成一个非常精美的动态动画,讲讲 {topic}
 要动态的,要像一个完整的,正在播放的视频。包含一个完整的过程，能把知识点讲清楚。
 页面极为精美，好看，有设计感，同时能够很好的传达知识。知识和图像要准确
 附带一些旁白式的文字解说,从头到尾讲清楚一个小的知识点
@@ -184,6 +199,11 @@ async def llm_event_stream(
 **字幕元素标识要求：所有字幕文本必须包含在具有 class="subtitle-text" 或 id="subtitle" 的元素中，每个字幕段落应该是一个独立的元素，便于程序识别和朗读。如果有多段字幕，每个字幕元素都应该有 class="subtitle-text"。**
 **请保证任何一个元素都在一个2k分辨率的容器中被摆在了正确的位置，避免穿模，字幕遮挡，图形位置错误等等问题影响正确的视觉传达**
 html+css+js+svg，放进一个html里"""
+    
+    # 如果是文字模式，不需要代码块格式
+    if mode == "text":
+        # 文字模式：直接返回文字回复，不需要代码块
+        pass
 
     if USE_GEMINI:
         try:
@@ -201,28 +221,43 @@ html+css+js+svg，放进一个html里"""
             )
             
             text = response.text
-            chunk_size = 50
+            # 根据模式调整chunk_size和延迟
+            if mode == "text":
+                chunk_size = 200  # 文字模式：更大的块，更快
+                sleep_time = 0.01  # 更短的延迟
+            else:
+                chunk_size = 50   # 动画模式：保持原有设置
+                sleep_time = 0.05
             
             for i in range(0, len(text), chunk_size):
                 chunk = text[i:i+chunk_size]
                 payload = json.dumps({"token": chunk}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(sleep_time)
                 
         except Exception as e:
             error_msg = {
                 "error": str(e),
                 "type": type(e).__name__,
-                "message": "生成动画时发生错误，请稍后重试"
+                "message": "生成内容时发生错误，请稍后重试" if mode == "text" else "生成动画时发生错误，请稍后重试"
             }
             yield f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
             return
     else:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            *history,
-            {"role": "user", "content": topic},
-        ]
+        if mode == "text":
+            # 文字模式：使用对话格式，不要求代码块
+            messages = [
+                {"role": "system", "content": system_prompt},
+                *history,
+                {"role": "user", "content": topic},
+            ]
+        else:
+            # 动画模式：原有逻辑
+            messages = [
+                {"role": "system", "content": system_prompt},
+                *history,
+                {"role": "user", "content": topic},
+            ]
 
         try:
             response = await client.chat.completions.create(
@@ -245,9 +280,52 @@ html+css+js+svg，放进一个html里"""
             if token:
                 payload = json.dumps({"token": token}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
-                await asyncio.sleep(0.001)
+                # 文字模式不需要延迟，直接流式输出；动画模式保持小延迟
+                if mode != "text":
+                    await asyncio.sleep(0.001)
 
     yield 'data: {"event":"[DONE]"}\n\n'
+
+def extract_html_from_text(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"```(?:html)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+async def generate_model_html(prompt: str, model: str = None) -> str:
+    if model is None:
+        model = MODEL
+    system_prompt = """你是一个教育建模助手。请根据用户输入的知识点或模型名称，生成一个可交互式的数学/教育模型页面。
+要求：
+1) 只输出一个完整的 HTML（包含 CSS + JS），不要输出 markdown 或代码块。
+2) 页面布局：左侧说明卡片（模型名称、定义、公式/参数说明），右侧为可交互的模型展示区域。
+3) 交互：至少包含 2 个可调参数（滑块/输入框），参数变化实时影响图形/模型。
+4) 语言：全部中文。
+5) 只使用原生 HTML/CSS/JS，不使用外部库或远程资源。
+6) 画面清爽，背景浅色，文字清晰，元素不拥挤。
+7) 模型需与主题匹配（例如圆锥曲线、三角函数、立体几何等）。"""
+
+    if USE_GEMINI:
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: gemini_client.models.generate_content(
+                model=model,
+                contents=f"{system_prompt}\n\n用户需求：{prompt}"
+            )
+        )
+        return extract_html_from_text(response.text)
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.6,
+    )
+    return extract_html_from_text(response.choices[0].message.content or "")
 
 # -----------------------------------------------------------------------
 # 3. 路由 (CHANGED: Now a POST request)
@@ -267,7 +345,11 @@ async def generate(
     async def event_generator():
         nonlocal accumulated_response
         try:
-            async for chunk in llm_event_stream(chat_request.topic, chat_request.history):
+            async for chunk in llm_event_stream(
+                chat_request.topic, 
+                chat_request.history,
+                mode=chat_request.mode or "animation"
+            ):
                 accumulated_response += chunk
                 if await request.is_disconnected():
                     break
@@ -291,6 +373,22 @@ async def generate(
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(wrapped_stream(), headers=headers)
+
+@app.post("/api/model/generate")
+async def generate_model(payload: ModelGenerateRequest):
+    prompt = payload.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+    if len(prompt) > 1000:
+        raise HTTPException(status_code=400, detail="Prompt too long (max 1000 characters)")
+
+    try:
+        html = await generate_model_html(prompt)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model generation failed: {str(e)}")
+    if not html:
+        raise HTTPException(status_code=500, detail="Empty model response")
+    return {"html": html}
 
 @app.get("/api/projects", response_model=List[Project])
 async def list_projects():
@@ -652,6 +750,22 @@ async def read_project(request: Request):
             "request": request,
             "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
             "view": "project"})
+
+@app.get("/model", response_class=HTMLResponse)
+async def read_model(request: Request):
+    return templates.TemplateResponse(
+        "index.html", {
+            "request": request,
+            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
+            "view": "model"})
+
+@app.get("/video", response_class=HTMLResponse)
+async def read_video(request: Request):
+    return templates.TemplateResponse(
+        "index.html", {
+            "request": request,
+            "time": datetime.now(shanghai_tz).strftime("%Y%m%d%H%M%S"),
+            "view": "video"})
 
 # -----------------------------------------------------------------------
 # 4. 本地启动命令

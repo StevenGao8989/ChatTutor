@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renameProjectPlaceholder: { zh: "输入新的项目名称", en: "Enter a new project name" },
         createProject: { zh: "新建项目", en: "New project" },
         projectName: { zh: "项目名称", en: "Project name" },
-        projectHint: { zh: "用于归档对话与文件。", en: "Keep related chats and files together." },
+        projectHint: { zh: "尽情发挥想象力", en: "Keep related chats and files together." },
         createProjectAction: { zh: "创建项目", en: "Create project" },
         projectNamePlaceholder: { zh: "例如：市场调研", en: "e.g. Market research" },
         addFiles: { zh: "添加文件", en: "Add files" },
@@ -97,6 +97,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const newChatView = document.getElementById('new-chat-view');
     const newChatForm = document.getElementById('new-chat-form');
     const newChatInput = document.getElementById('new-chat-input');
+    const modelView = document.getElementById('model-view');
+    const modelForm = document.getElementById('model-form');
+    const modelInput = document.getElementById('model-input');
+    const modelOutput = document.getElementById('model-output');
+    const videoView = document.getElementById('video-view');
+    const videoForm = document.getElementById('video-form');
+    const videoInput = document.getElementById('video-input');
+    const videoLog = document.getElementById('video-log');
 
     const templates = {
         user: document.getElementById('user-message-template'),
@@ -130,7 +138,8 @@ document.addEventListener('DOMContentLoaded', () => {
         expandedProjectIds: new Set(),
         // 用于跟踪正在进行的生成请求
         currentGenerationAbortController: null,
-        currentGenerationChatId: null
+        currentGenerationChatId: null,
+        pendingChatLoadId: null
     };
 
     // ========== TTS 管理器 ==========
@@ -606,9 +615,24 @@ document.addEventListener('DOMContentLoaded', () => {
             newChatInput.value = '';
             if (!appState.activeChatId) return;
             
+            // 保存用户消息到历史（在切换视图之前）
+            appState.conversationHistory.push({ role: 'user', content: topic });
+            appendMessageToChat(appState.activeChatId, 'user', topic);
+            
             // 刷新对话列表以显示更新后的标题
             refreshChats();
             showChatView(); // 切换到正常聊天视图
+            
+            // 确保聊天日志可见且隐藏欢迎消息，并立即显示用户消息
+            if (chatLog) {
+                const welcomeMessage = document.getElementById('chat-welcome');
+                if (welcomeMessage) {
+                    welcomeMessage.style.display = 'none';
+                }
+                // 立即显示用户消息（在生成之前，确保用户能看到自己的问题）
+                appendUserMessage(topic);
+            }
+            
             const url = new URL(window.location.href);
             url.searchParams.delete('project_id');
             if (appState.activeChatId) {
@@ -616,15 +640,130 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             window.history.pushState({ view: 'chat', chat_id: appState.activeChatId }, '', url.toString());
             
-            // 开始生成
-            await startGeneration(topic, appState.activeChatId);
+            // 开始生成（文字模式）
+            // 注意：startGeneration 中也会调用 appendUserMessage，但我们已经在上面的显示过了
+            // 为了避免重复显示，我们需要检查 startGeneration 中的逻辑
+            await startGeneration(topic, appState.activeChatId, { 
+                renderUI: true,
+                mode: "text"  // 新对话使用文字模式
+            });
         } catch (error) {
             console.error('Failed to start new chat generation:', error);
         }
     }
 
+    async function handleModelSubmit(e) {
+        e.preventDefault();
+        if (!modelInput || !modelOutput) return;
+        const prompt = modelInput.value.trim();
+        if (!prompt) return;
+
+        modelOutput.innerHTML = '<div class="model-placeholder"><p>正在生成模型，请稍候...</p></div>';
+
+        try {
+            // 创建新对话记录
+            const newChat = await createChat(prompt, null);
+            const chatId = newChat?.id;
+            
+            if (chatId) {
+                appState.activeChatId = chatId;
+                appState.highlightedChatId = chatId;
+                // 保存用户消息
+                await appendMessageToChat(chatId, 'user', prompt);
+                appState.conversationHistory.push({ role: 'user', content: prompt });
+            }
+
+            const response = await fetch(`${config.apiBaseUrl}/api/model/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const html = data?.html || '';
+            if (!html.trim()) {
+                throw new Error('Empty model response');
+            }
+
+            // 保存生成的模型HTML到对话记录
+            if (chatId) {
+                await appendMessageToChat(chatId, 'assistant', html);
+                appState.conversationHistory.push({ role: 'assistant', content: html });
+                // 刷新对话列表以显示新创建的对话
+                refreshChats();
+            }
+
+            // 使用新的 appendModelToView 函数显示模型，包含模型名称和全屏功能
+            appendModelToView(html, prompt);
+            
+            // 更新URL以包含chat_id，方便用户刷新后仍能看到记录
+            if (chatId) {
+                const url = new URL(window.location.href);
+                url.searchParams.set('chat_id', chatId);
+                window.history.pushState({ view: 'model', chat_id: chatId }, '', url.toString());
+            }
+        } catch (error) {
+            console.error('Model generation failed:', error);
+            modelOutput.innerHTML = '<div class="model-error">模型生成失败，请稍后重试。</div>';
+        }
+    }
+
+    async function handleVideoSubmit(e) {
+        e.preventDefault();
+        if (!videoInput) return;
+        const topic = videoInput.value.trim();
+        if (!topic) return;
+        
+        try {
+            // 自动创建新对话，使用用户输入的问题作为标题
+            const newChat = await createChat(topic, null);
+            appState.activeChatId = newChat?.id || null;
+            appState.highlightedChatId = appState.activeChatId;
+            videoInput.value = '';
+            if (!appState.activeChatId) return;
+            
+            // 保存用户消息到历史
+            appState.conversationHistory.push({ role: 'user', content: topic });
+            appendMessageToChat(appState.activeChatId, 'user', topic);
+            
+            // 刷新对话列表以显示更新后的标题
+            refreshChats();
+            
+            // 隐藏欢迎消息和表单（显示日志区域）
+            const videoHero = videoView?.querySelector('.new-chat-hero');
+            if (videoHero) {
+                videoHero.style.display = 'none';
+            }
+            if (videoLog) {
+                videoLog.style.display = 'flex';
+            }
+            
+            // 更新 URL
+            const url = new URL(window.location.href);
+            url.searchParams.delete('project_id');
+            if (appState.activeChatId) {
+                url.searchParams.set('chat_id', appState.activeChatId);
+            }
+            window.history.pushState({ view: 'video', chat_id: appState.activeChatId }, '', url.toString());
+            
+            // 开始生成动画（创建对话，保存历史）
+            await startGeneration(topic, appState.activeChatId, { 
+                renderUI: true,
+                targetLog: videoLog,
+                mode: "animation"  // 视频使用动画模式
+            });
+        } catch (error) {
+            console.error('Failed to start video generation:', error);
+        }
+    }
+
     async function startGeneration(topic, chatId, options = {}) {
-        const { renderUI = true } = options;
+        const { renderUI = true, targetLog = null, mode = "animation" } = options;
         console.log('Getting generation from backend.');
         
         // 取消之前的请求（如果有）
@@ -638,16 +777,26 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.currentGenerationAbortController = abortController;
         appState.currentGenerationChatId = chatId;
         
+        // 确定目标日志容器
+        const logContainer = targetLog || chatLog;
+        
         // 在函数作用域内定义 submitButton，确保 finally 块可以访问
         const submitButton = document.querySelector('.submit-button');
-        const welcomeMessage = document.getElementById('chat-welcome');
+        const welcomeMessage = targetLog ? null : document.getElementById('chat-welcome');
         let agentThinkingMessage = null;
         
         if (renderUI && welcomeMessage) {
             welcomeMessage.style.display = 'none';
         }
-        if (renderUI) appendUserMessage(topic);
-        agentThinkingMessage = renderUI ? appendAgentStatus(translations.agentThinking[currentLang]) : null;
+        // 检查用户消息是否已经显示（避免重复显示）
+        const existingUserMessages = logContainer.querySelectorAll('.message-group.user');
+        const lastUserMessage = existingUserMessages[existingUserMessages.length - 1];
+        const userMessageAlreadyShown = lastUserMessage && lastUserMessage.querySelector('.message-bubble')?.textContent === topic;
+        
+        if (renderUI && !userMessageAlreadyShown) {
+            appendUserMessage(topic, logContainer);
+        }
+        agentThinkingMessage = renderUI ? appendAgentStatus(translations.agentThinking[currentLang], logContainer) : null;
         
         if (submitButton) {
             submitButton.disabled = true;
@@ -656,13 +805,18 @@ document.addEventListener('DOMContentLoaded', () => {
         appState.accumulatedCode = '';
         let inCodeBlock = false;
         let codeBlockElement = null;
+        let textMessageElement = null; // 文字模式下的消息元素
         let reader = null; // 在函数作用域内定义，确保 finally 可以访问
 
         try {
             const response = await fetch(`${config.apiBaseUrl}/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ topic: topic, history: appState.conversationHistory }),
+                body: JSON.stringify({ 
+                    topic: topic, 
+                    history: appState.conversationHistory,
+                    mode: mode  // "animation" 或 "text"
+                }),
                 signal: abortController.signal
             });
 
@@ -715,27 +869,38 @@ document.addEventListener('DOMContentLoaded', () => {
                                 refreshChats();
                             }
 
-                            if (renderUI && !codeBlockElement) {
-                                console.warn('No code block element created. Full response:', appState.accumulatedCode);
-                                throw new LLMParseError('LLM did not return a complete code block.');
-                            }
-
-                            if (renderUI && !isHtmlContentValid(appState.accumulatedCode)) {
-                                console.warn('Invalid HTML received:\n', appState.accumulatedCode);
-                                throw new LLMParseError('Invalid HTML content received.');
-                            }
-
-                            if (renderUI && codeBlockElement) {
-                                markCodeAsComplete(codeBlockElement);
-                            }
-
-                            try {
-                                if (renderUI && appState.accumulatedCode) {
-                                    appendAnimationPlayer(appState.accumulatedCode, topic);
+                            // 根据模式处理响应
+                            if (mode === "text") {
+                                // 文字模式：显示文字回复，不创建动画，不显示代码块
+                                // 文字消息已经在流式过程中显示完成，这里不需要额外处理
+                                if (renderUI && textMessageElement) {
+                                    // 确保文字消息完整显示
+                                    textMessageElement.classList.add('complete');
                                 }
-                            } catch (err) {
-                                console.error('appendAnimationPlayer failed:', err);
-                                throw new LLMParseError('Animation rendering failed.');
+                            } else {
+                                // 动画模式：原有逻辑
+                                if (renderUI && !codeBlockElement) {
+                                    console.warn('No code block element created. Full response:', appState.accumulatedCode);
+                                    throw new LLMParseError('LLM did not return a complete code block.');
+                                }
+
+                                if (renderUI && !isHtmlContentValid(appState.accumulatedCode)) {
+                                    console.warn('Invalid HTML received:\n', appState.accumulatedCode);
+                                    throw new LLMParseError('Invalid HTML content received.');
+                                }
+
+                                if (renderUI && codeBlockElement) {
+                                    markCodeAsComplete(codeBlockElement);
+                                }
+
+                                try {
+                                    if (renderUI && appState.accumulatedCode) {
+                                        appendAnimationPlayer(appState.accumulatedCode, topic, logContainer);
+                                    }
+                                } catch (err) {
+                                    console.error('appendAnimationPlayer failed:', err);
+                                    throw new LLMParseError('Animation rendering failed.');
+                                }
                             }
                             scrollToBottom();
                             return;
@@ -755,24 +920,41 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                         const token = data.token || '';
 
-                        if (!inCodeBlock && token.includes('```')) {
-                            inCodeBlock = true;
-                            if (agentThinkingMessage) agentThinkingMessage.remove();
+                        if (mode === "text") {
+                            // 文字模式：直接累积文字，不检测代码块，就像普通聊天一样
+                            appState.accumulatedCode += token;
                             if (renderUI) {
-                                codeBlockElement = appendCodeBlock();
+                                if (agentThinkingMessage) {
+                                    agentThinkingMessage.remove();
+                                    agentThinkingMessage = null;
+                                }
+                                if (!textMessageElement) {
+                                    // 创建文字消息元素（类似用户消息，但是AI回复）
+                                    textMessageElement = appendTextMessage(logContainer);
+                                }
+                                updateTextMessage(textMessageElement, token);
                             }
-                            const contentAfterMarker = token.substring(token.indexOf('```') + 3).replace(/^html\n/, '');
-                            appState.accumulatedCode += contentAfterMarker;
-                            if (renderUI) updateCodeBlock(codeBlockElement, contentAfterMarker);
-                        } else if (inCodeBlock) {
-                            if (token.includes('```')) {
-                                inCodeBlock = false;
-                                const contentBeforeMarker = token.substring(0, token.indexOf('```'));
-                                appState.accumulatedCode += contentBeforeMarker;
-                                if (renderUI) updateCodeBlock(codeBlockElement, contentBeforeMarker);
-                            } else {
-                                appState.accumulatedCode += token;
-                                if (renderUI) updateCodeBlock(codeBlockElement, token);
+                        } else {
+                            // 动画模式：原有逻辑，检测代码块
+                            if (!inCodeBlock && token.includes('```')) {
+                                inCodeBlock = true;
+                                if (agentThinkingMessage) agentThinkingMessage.remove();
+                                if (renderUI) {
+                                    codeBlockElement = appendCodeBlock(logContainer);
+                                }
+                                const contentAfterMarker = token.substring(token.indexOf('```') + 3).replace(/^html\n/, '');
+                                appState.accumulatedCode += contentAfterMarker;
+                                if (renderUI) updateCodeBlock(codeBlockElement, contentAfterMarker);
+                            } else if (inCodeBlock) {
+                                if (token.includes('```')) {
+                                    inCodeBlock = false;
+                                    const contentBeforeMarker = token.substring(0, token.indexOf('```'));
+                                    appState.accumulatedCode += contentBeforeMarker;
+                                    if (renderUI) updateCodeBlock(codeBlockElement, contentBeforeMarker);
+                                } else {
+                                    appState.accumulatedCode += token;
+                                    if (renderUI) updateCodeBlock(codeBlockElement, token);
+                                }
                             }
                         }
                 }
@@ -815,7 +997,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 showWarning(translations.errorFetchFailed[currentLang]); // 默认 fallback
             }
 
-            appendErrorMessage(translations.errorMessage[currentLang]);  // 保留 chat-log 中的提示
+            appendErrorMessage(translations.errorMessage[currentLang], logContainer);  // 保留日志中的提示
         } finally {
             // 清理 AbortController（如果请求正常完成且未被取消）
             if (appState.currentGenerationChatId === chatId && appState.currentGenerationAbortController) {
@@ -842,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function appendFromTemplate(template, text) {
+    function appendFromTemplate(template, text, targetContainer = null) {
         const node = template.content.cloneNode(true);
         const element = node.firstElementChild;
         if (text) element.innerHTML = element.innerHTML.replace('${text}', text);
@@ -851,15 +1033,42 @@ document.addEventListener('DOMContentLoaded', () => {
             const translation = translations[key]?.[currentLang];
             if (translation) el.textContent = translation;
         });
-        chatLog.appendChild(element);
+        const container = targetContainer || chatLog;
+        container.appendChild(element);
         scrollToBottom();
         return element;
     }
 
-    const appendUserMessage = (text) => appendFromTemplate(templates.user, text);
-    const appendAgentStatus = (text) => appendFromTemplate(templates.status, text);
-    const appendErrorMessage = (text) => appendFromTemplate(templates.error, text);
-    const appendCodeBlock = () => appendFromTemplate(templates.code);
+    const appendUserMessage = (text, targetContainer = null) => appendFromTemplate(templates.user, text, targetContainer);
+    const appendAgentStatus = (text, targetContainer = null) => appendFromTemplate(templates.status, text, targetContainer);
+    const appendErrorMessage = (text, targetContainer = null) => appendFromTemplate(templates.error, text, targetContainer);
+    const appendCodeBlock = (targetContainer = null) => appendFromTemplate(templates.code, null, targetContainer);
+    
+    // 文字消息相关函数（普通聊天样式，就像用户和AI的普通对话）
+    function appendTextMessage(targetContainer = null) {
+        const container = targetContainer || chatLog;
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message-group agent';
+        // 使用标准的消息气泡样式，就像普通聊天一样
+        const bubble = document.createElement('div');
+        bubble.className = 'message-bubble';
+        messageElement.appendChild(bubble);
+        container.appendChild(messageElement);
+        scrollToBottom();
+        return messageElement;
+    }
+    
+    function updateTextMessage(messageElement, text) {
+        const bubble = messageElement.querySelector('.message-bubble');
+        if (bubble) {
+            // 直接追加文字，就像普通聊天一样，保持换行
+            bubble.textContent += text;
+            // 自动滚动到底部
+            requestAnimationFrame(() => {
+                scrollToBottom();
+            });
+        }
+    }
 
     function updateCodeBlock(codeBlockElement, text) {
         const codeElement = codeBlockElement.querySelector('code');
@@ -884,7 +1093,7 @@ document.addEventListener('DOMContentLoaded', () => {
         codeBlockElement.querySelector('.code-details').removeAttribute('open');
     }
 
-    function appendAnimationPlayer(htmlContent, topic) {
+    function appendAnimationPlayer(htmlContent, topic, targetContainer = null) {
         console.log('Appending animation player with topic:', topic);
         const node = templates.player.content.cloneNode(true);
         const playerElement = node.firstElementChild;
@@ -894,6 +1103,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const iframe = playerElement.querySelector('.animation-iframe');
         iframe.srcdoc = htmlContent;
+        
+        const container = targetContainer || chatLog;
         
         // ========== 播放器控制栏功能 ==========
         const playPauseBtn = playerElement.querySelector('.play-pause-btn');
@@ -1378,7 +1589,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         // ========== TTS 功能结束 ==========
 
-        chatLog.appendChild(playerElement);
+        container.appendChild(playerElement);
         scrollToBottom();
     }
 
@@ -1463,6 +1674,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (chatMain) {
             chatMain.classList.add('show-project');
             chatMain.classList.remove('show-new-chat');
+            chatMain.classList.remove('show-model');
+            chatMain.classList.remove('show-video');
         }
         updateHeaderProject();
         updateChatListTitle();
@@ -1478,6 +1691,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (chatMain) {
             chatMain.classList.remove('show-project');
             chatMain.classList.remove('show-new-chat');
+            chatMain.classList.remove('show-model');
+            chatMain.classList.remove('show-video');
         }
         updateHeaderProject();
         updateChatListTitle();
@@ -1488,6 +1703,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (chatMain) {
             chatMain.classList.remove('show-project');
             chatMain.classList.add('show-new-chat');
+            chatMain.classList.remove('show-model');
+            chatMain.classList.remove('show-video');
         }
         updateHeaderProject();
         updateChatListTitle();
@@ -1496,6 +1713,58 @@ document.addEventListener('DOMContentLoaded', () => {
         if (newChatInput) {
             setTimeout(() => newChatInput.focus(), 100);
         }
+    };
+
+    const showModelView = () => {
+        if (chatMain) {
+            chatMain.classList.add('show-model');
+            chatMain.classList.remove('show-project');
+            chatMain.classList.remove('show-new-chat');
+            chatMain.classList.remove('show-video');
+        }
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
+    };
+
+    // 重置建模视图的输入界面显示状态
+    const resetModelViewInput = () => {
+        const modelHero = document.querySelector('.model-hero');
+        if (modelHero) {
+            const titleRow = modelHero.querySelector('.model-title-row');
+            const modelForm = modelHero.querySelector('.model-form');
+            const modelSuggestions = modelHero.querySelector('.model-suggestions');
+            if (titleRow) titleRow.style.display = '';
+            if (modelForm) modelForm.style.display = '';
+            if (modelSuggestions) modelSuggestions.style.display = '';
+        }
+    };
+
+    const showVideoView = () => {
+        if (chatMain) {
+            chatMain.classList.add('show-video');
+            chatMain.classList.remove('show-project');
+            chatMain.classList.remove('show-new-chat');
+            chatMain.classList.remove('show-model');
+        }
+        // 如果有内容，隐藏欢迎界面，显示日志
+        if (videoLog && videoLog.children.length > 0) {
+            const videoHero = videoView?.querySelector('.new-chat-hero');
+            if (videoHero) {
+                videoHero.style.display = 'none';
+            }
+            videoLog.style.display = 'flex';
+        } else {
+            // 如果没有内容，显示欢迎界面
+            const videoHero = videoView?.querySelector('.new-chat-hero');
+            if (videoHero) {
+                videoHero.style.display = 'flex';
+            }
+            videoLog.style.display = 'none';
+        }
+        updateHeaderProject();
+        updateChatListTitle();
+        updateChatListVisibility();
     };
 
     const syncProjectContext = (projectId, projectName = '') => {
@@ -1869,16 +2138,113 @@ document.addEventListener('DOMContentLoaded', () => {
         chatLog.appendChild(welcome);
     };
 
+    // 创建建模结果容器（不包含控制栏，只有全屏按钮）
+    const createModelResultContainer = (htmlContent, modelName = '', targetContainer = null) => {
+        // 创建容器
+        const container = document.createElement('div');
+        container.className = 'model-result-container';
+        
+        // 创建标题栏（显示模型名称和全屏按钮）
+        const header = document.createElement('div');
+        header.className = 'model-result-header';
+        
+        if (modelName) {
+            const title = document.createElement('h3');
+            title.className = 'model-result-title';
+            title.textContent = modelName;
+            header.appendChild(title);
+        }
+        
+        // 全屏按钮
+        const fullscreenBtn = document.createElement('button');
+        fullscreenBtn.className = 'model-fullscreen-btn';
+        fullscreenBtn.type = 'button';
+        fullscreenBtn.title = '全屏';
+        fullscreenBtn.innerHTML = `
+            <svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+            </svg>
+            <svg class="exit-fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
+            </svg>
+        `;
+        
+        // 全屏功能
+        const fullscreenIcon = fullscreenBtn.querySelector('.fullscreen-icon');
+        const exitFullscreenIcon = fullscreenBtn.querySelector('.exit-fullscreen-icon');
+        
+        fullscreenBtn.addEventListener('click', () => {
+            if (!container.classList.contains('fullscreen')) {
+                // 进入全屏
+                container.classList.add('fullscreen');
+                fullscreenIcon.style.display = 'none';
+                exitFullscreenIcon.style.display = 'block';
+                document.body.style.overflow = 'hidden';
+            } else {
+                // 退出全屏
+                container.classList.remove('fullscreen');
+                fullscreenIcon.style.display = 'block';
+                exitFullscreenIcon.style.display = 'none';
+                document.body.style.overflow = '';
+            }
+        });
+        
+        header.appendChild(fullscreenBtn);
+        container.appendChild(header);
+        
+        // 创建iframe
+        const iframe = document.createElement('iframe');
+        iframe.className = 'model-frame';
+        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+        iframe.srcdoc = htmlContent;
+        
+        const contentWrapper = document.createElement('div');
+        contentWrapper.className = 'model-content-wrapper';
+        contentWrapper.appendChild(iframe);
+        container.appendChild(contentWrapper);
+        
+        return container;
+    };
+
+    // 在建模视图中显示模型内容
+    const appendModelToView = (htmlContent, modelName = '') => {
+        if (!modelOutput) return;
+        const container = createModelResultContainer(htmlContent, modelName);
+        modelOutput.innerHTML = '';
+        modelOutput.appendChild(container);
+    };
+
     const addCodeBlockFromContent = (content, title = '') => {
-        const codeBlockElement = appendCodeBlock();
-        const codeElement = codeBlockElement.querySelector('code');
-        if (codeElement) codeElement.textContent = content;
-        markCodeAsComplete(codeBlockElement);
-        if (content) appendAnimationPlayer(content, title);
+        if (!content) return;
+        
+        // 检查内容是否是HTML动画（包含HTML标签）
+        // 简单判断：如果包含HTML标签（如 <html>, <div>, <svg> 等），则认为是HTML动画
+        const hasHtmlTags = /<[a-z][\s\S]*>/i.test(content);
+        const isHtmlAnimation = hasHtmlTags && isHtmlContentValid(content);
+        
+        if (isHtmlAnimation) {
+            // 只有是HTML动画时才创建代码块和播放器
+            const codeBlockElement = appendCodeBlock();
+            const codeElement = codeBlockElement.querySelector('code');
+            if (codeElement) codeElement.textContent = content;
+            markCodeAsComplete(codeBlockElement);
+            appendAnimationPlayer(content, title);
+        } else {
+            // 纯文字内容：直接显示为文字消息，不创建代码块和播放器
+            const textElement = appendTextMessage();
+            const bubble = textElement.querySelector('.message-bubble');
+            if (bubble) {
+                bubble.textContent = content;
+            }
+        }
     };
 
     const loadChatById = async (chatId) => {
+        appState.pendingChatLoadId = chatId;
         const detail = await fetchChatDetail(chatId);
+        if (appState.pendingChatLoadId !== chatId) {
+            return;
+        }
         if (!detail) return;
         appState.activeChatId = chatId;
         appState.highlightedChatId = chatId;
@@ -1896,20 +2262,56 @@ document.addEventListener('DOMContentLoaded', () => {
             updateChatListVisibility();
             renderProjectList(appState.cachedProjects);
         }
-        showChatView();
+        
+        // 检查当前路径，决定显示在哪个视图
+        const currentPath = window.location.pathname;
+        const isModelView = currentPath === '/model';
+        
         appState.conversationHistory = detail.messages || [];
-        clearChatLog();
-        if (appState.conversationHistory.length) {
-            const welcomeMessage = document.getElementById('chat-welcome');
-            if (welcomeMessage) welcomeMessage.style.display = 'none';
-            appState.conversationHistory.forEach(message => {
-                if (message.role === 'user') {
-                    appendUserMessage(message.content);
-                } else if (message.role === 'assistant') {
-                    addCodeBlockFromContent(message.content, detail.title || '');
+        
+        if (isModelView) {
+            // 在建模视图中显示
+            showModelView();
+            // 在建模视图中，只显示模型结果，隐藏输入界面
+            if (appState.conversationHistory.length > 0) {
+                // 找到最后一个用户消息作为模型名称
+                const lastUserMessage = [...appState.conversationHistory].reverse().find(m => m.role === 'user');
+                const modelName = lastUserMessage ? lastUserMessage.content : '';
+                
+                // 找到最后一个assistant消息（模型HTML）
+                const lastModelMessage = [...appState.conversationHistory].reverse().find(m => m.role === 'assistant');
+                if (lastModelMessage && lastModelMessage.content) {
+                    // 隐藏输入界面（标题、输入框、热门模型）
+                    const modelHero = document.querySelector('.model-hero');
+                    if (modelHero) {
+                        const titleRow = modelHero.querySelector('.model-title-row');
+                        const modelForm = modelHero.querySelector('.model-form');
+                        const modelSuggestions = modelHero.querySelector('.model-suggestions');
+                        if (titleRow) titleRow.style.display = 'none';
+                        if (modelForm) modelForm.style.display = 'none';
+                        if (modelSuggestions) modelSuggestions.style.display = 'none';
+                    }
+                    // 显示模型结果
+                    appendModelToView(lastModelMessage.content, modelName);
                 }
-            });
+            }
+        } else {
+            // 在聊天视图中显示
+            showChatView();
+            clearChatLog();
+            if (appState.conversationHistory.length) {
+                const welcomeMessage = document.getElementById('chat-welcome');
+                if (welcomeMessage) welcomeMessage.style.display = 'none';
+                appState.conversationHistory.forEach(message => {
+                    if (message.role === 'user') {
+                        appendUserMessage(message.content);
+                    } else if (message.role === 'assistant') {
+                        addCodeBlockFromContent(message.content, detail.title || '');
+                    }
+                });
+            }
         }
+        
         refreshChats();
         if (window.location.pathname === '/chat' || window.location.pathname === '/project') {
             const url = new URL(window.location.href);
@@ -1923,7 +2325,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 url.searchParams.delete('project_id');
             }
             window.history.pushState({ view: 'chat', chat_id: chatId }, '', url.toString());
+        } else if (window.location.pathname === '/model') {
+            const url = new URL(window.location.href);
+            url.searchParams.set('chat_id', chatId);
+            window.history.pushState({ view: 'model', chat_id: chatId }, '', url.toString());
         }
+        appState.pendingChatLoadId = null;
     };
 
     const closeMenus = () => {
@@ -1985,8 +2392,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function init() {
         // 根据URL路径决定显示哪个视图
         const path = window.location.pathname;
-        if (path === '/chat' || path === '/project') {
-            // 如果是 /chat 或 /project 路由，直接显示聊天视图
+        if (path === '/chat' || path === '/project' || path === '/model' || path === '/video') {
+            // 如果是 /chat、/project 或 /model 路由，直接显示聊天视图
             body.classList.remove('show-initial-view');
             body.classList.add('show-chat-view');
             languageSwitcher.style.display = 'none';
@@ -1995,10 +2402,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const chatId = searchParams.get('chat_id');
             const projectId = searchParams.get('project_id');
             if (chatId) {
+                // loadChatById 会根据当前路径自动选择正确的视图
                 loadChatById(chatId);
-                showChatView();
             } else if (projectId) {
                 setActiveProject(projectId, '', { updateHistory: false });
+            } else if (path === '/model') {
+                showModelView();
+            } else if (path === '/video') {
+                showVideoView();
+            } else {
+                showNewChatView();
             }
         } else {
             // 默认显示初始视图
@@ -2023,6 +2436,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 window.location.href = '/chat';
                 return;
             }
+            appState.pendingChatLoadId = null;
             appState.activeProjectId = null;
             appState.activeProjectName = '';
             appState.activeChatId = null;
@@ -2035,6 +2449,37 @@ document.addEventListener('DOMContentLoaded', () => {
             url.searchParams.delete('chat_id');
             window.history.pushState({ view: 'new-chat' }, '', url.toString());
         });
+        
+        // 建模按钮点击事件
+        const modelButton = document.getElementById('model-button');
+        if (modelButton) {
+            modelButton.addEventListener('click', () => {
+                // 重置输入界面显示状态
+                resetModelViewInput();
+                window.location.href = '/model';
+            });
+        }
+
+        const videoButton = document.getElementById('video-button');
+        if (videoButton) {
+            videoButton.addEventListener('click', () => {
+                window.location.href = '/video';
+            });
+        }
+
+        modelForm?.addEventListener('submit', handleModelSubmit);
+        modelView?.querySelectorAll('[data-model-prompt]')?.forEach((card) => {
+            card.addEventListener('click', () => {
+                const prompt = card.getAttribute('data-model-prompt');
+                if (!prompt || !modelInput) return;
+                // 只填充输入框，不自动提交，需要用户点击发送按钮
+                modelInput.value = prompt;
+                // 聚焦到输入框，方便用户编辑或直接发送
+                modelInput.focus();
+            });
+        });
+        
+        videoForm?.addEventListener('submit', handleVideoSubmit);
         
         // 侧边栏折叠/展开功能
         if (sidebarToggle && chatSidebar) {
@@ -2302,6 +2747,16 @@ document.addEventListener('DOMContentLoaded', () => {
             if (e.target === projectModal) hideProjectModal();
         });
 
+        const projectTags = projectModal?.querySelectorAll('.project-tag');
+        projectTags?.forEach((tag) => {
+            tag.addEventListener('click', () => {
+                const label = tag.textContent?.trim();
+                if (!label || !projectNameInput) return;
+                projectNameInput.value = label;
+                projectNameInput.focus();
+            });
+        });
+
         const submitProject = async () => {
             const name = projectNameInput?.value.trim() || '';
             if (!name) {
@@ -2338,7 +2793,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // 处理浏览器前进/后退按钮
         window.addEventListener('popstate', (e) => {
             const path = window.location.pathname;
-        if (path === '/chat' || path === '/project') {
+        if (path === '/chat' || path === '/project' || path === '/model' || path === '/video') {
             body.classList.remove('show-initial-view');
             body.classList.add('show-chat-view');
             languageSwitcher.style.display = 'none';
@@ -2347,12 +2802,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const chatId = searchParams.get('chat_id');
             const projectId = searchParams.get('project_id');
             if (chatId) {
+                // loadChatById 会根据当前路径自动选择正确的视图
                 loadChatById(chatId);
-                showChatView();
             } else if (projectId) {
                 setActiveProject(projectId, '', { updateHistory: false });
+            } else if (path === '/model') {
+                showModelView();
+            } else if (path === '/video') {
+                showVideoView();
             } else {
-                showChatView();
+                showNewChatView();
             }
         } else {
                 body.classList.add('show-initial-view');
